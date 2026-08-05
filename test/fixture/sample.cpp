@@ -1,6 +1,10 @@
 #include "sample.hpp"
 
+#warning "Clang diagnostic counter fixture"
+
 namespace project {
+
+int TIME_ESCAPE = 30;
 
 double Processor::AverageValue = 1.0;
 

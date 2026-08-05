@@ -11,6 +11,10 @@ pub const TypeMapping = struct {
     prefix: []const u8,
 };
 
+pub const VariableStyle = enum {
+    upper_snake,
+};
+
 pub const Config = struct {
     member_prefix: []const u8 = "m_",
     static_member_prefix: []const u8 = "m_",
@@ -19,10 +23,16 @@ pub const Config = struct {
     free_function_case: FunctionCase = .lower_camel,
     use_canonical_type: bool = true,
     pointer_marker: []const u8 = "p",
+    member_alternatives: std.ArrayList(VariableStyle) = .empty,
+    static_member_alternatives: std.ArrayList(VariableStyle) = .empty,
+    global_alternatives: std.ArrayList(VariableStyle) = .empty,
     mappings: std.ArrayList(TypeMapping) = .empty,
     pointer_mappings: std.ArrayList(TypeMapping) = .empty,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        self.member_alternatives.deinit(allocator);
+        self.static_member_alternatives.deinit(allocator);
+        self.global_alternatives.deinit(allocator);
         self.mappings.deinit(allocator);
         self.pointer_mappings.deinit(allocator);
     }
@@ -135,6 +145,19 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
         if (std.mem.eql(u8, section, "scope")) {
             const value = try parseString(allocator, value_text);
             if (std.mem.eql(u8, key, "member")) config.member_prefix = value else if (std.mem.eql(u8, key, "static_member")) config.static_member_prefix = value else if (std.mem.eql(u8, key, "global")) config.global_prefix = value else return invalidKey(config_path, line_number, section, key);
+        } else if (std.mem.eql(u8, section, "scope_alternatives")) {
+            const alternatives = if (std.mem.eql(u8, key, "member"))
+                &config.member_alternatives
+            else if (std.mem.eql(u8, key, "static_member"))
+                &config.static_member_alternatives
+            else if (std.mem.eql(u8, key, "global"))
+                &config.global_alternatives
+            else
+                return invalidKey(config_path, line_number, section, key);
+            parseVariableStyles(allocator, value_text, alternatives) catch |err| {
+                std.log.err("{s}:{d}: scope alternatives must be an array containing upper_snake", .{ config_path, line_number });
+                return err;
+            };
         } else if (std.mem.eql(u8, section, "functions")) {
             const value = try parseString(allocator, value_text);
             const function_case = parseFunctionCase(value) orelse {
@@ -182,6 +205,51 @@ fn parseFunctionCase(value: []const u8) ?FunctionCase {
     if (std.mem.eql(u8, value, "unchanged")) return .unchanged;
 
     return null;
+}
+
+fn parseVariableStyles(
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    output: *std.ArrayList(VariableStyle),
+) !void {
+    const trimmed = std.mem.trim(u8, text, " \t");
+    if (trimmed.len < 2 or trimmed[0] != '[' or trimmed[trimmed.len - 1] != ']')
+        return error.InvalidConfig;
+
+    var remaining = std.mem.trim(u8, trimmed[1 .. trimmed.len - 1], " \t");
+    while (remaining.len > 0) {
+        if (remaining[0] != '"') return error.InvalidConfig;
+
+        var escaped = false;
+        var end: ?usize = null;
+        var i: usize = 1;
+        while (i < remaining.len) : (i += 1) {
+            if (escaped) {
+                escaped = false;
+            } else if (remaining[i] == '\\') {
+                escaped = true;
+            } else if (remaining[i] == '"') {
+                end = i + 1;
+                break;
+            }
+        }
+
+        const string_end = end orelse return error.InvalidConfig;
+        const value = try parseString(allocator, remaining[0..string_end]);
+        defer allocator.free(value);
+        const style: VariableStyle = if (std.mem.eql(u8, value, "upper_snake"))
+            .upper_snake
+        else
+            return error.InvalidConfig;
+        if (std.mem.indexOfScalar(VariableStyle, output.items, style) == null)
+            try output.append(allocator, style);
+
+        remaining = std.mem.trim(u8, remaining[string_end..], " \t");
+        if (remaining.len == 0) break;
+        if (remaining[0] != ',') return error.InvalidConfig;
+        remaining = std.mem.trim(u8, remaining[1..], " \t");
+        if (remaining.len == 0) return error.InvalidConfig;
+    }
 }
 
 fn parseString(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -248,4 +316,14 @@ test "TOML type keys may be bare or quoted" {
     const quoted = try parseKey(allocator, "\"project::Request\"");
     defer allocator.free(quoted);
     try std.testing.expectEqualStrings("project::Request", quoted);
+}
+
+test "scope alternatives parse as a string array" {
+    const allocator = std.testing.allocator;
+    var styles: std.ArrayList(VariableStyle) = .empty;
+    defer styles.deinit(allocator);
+
+    try parseVariableStyles(allocator, "[\"upper_snake\"]", &styles);
+
+    try std.testing.expectEqualSlices(VariableStyle, &.{.upper_snake}, styles.items);
 }

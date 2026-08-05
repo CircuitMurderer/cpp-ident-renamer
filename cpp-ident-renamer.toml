@@ -6,6 +6,9 @@ member = "m_"
 static_member = "m_"
 global = "g_"
 
+[scope_alternatives]
+global = ["upper_snake"]
+
 [functions]
 member = "camel"
 free = "camel"

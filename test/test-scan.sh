@@ -18,7 +18,7 @@ set +e
 "$tool" check \
   -p test/fixture/compile_commands.json \
   -c test/fixture/cpp-ident-renamer.toml \
-  --root . >/dev/null
+  --root . >/dev/null 2>scan-progress.txt
 status=$?
 set -e
 
@@ -26,4 +26,11 @@ set -e
 [ -s idents.tsv ]
 awk -F '\t' '
   NF < 5 || length($1) != 64 || $1 !~ /^[[:xdigit:]]+$/ { exit 1 }
+  $3 == "TIME_ESCAPE" { exit 1 }
 ' idents.tsv
+grep -q '^Warnings: 1$' scan-progress.txt
+grep -q '^Errors: 0$' scan-progress.txt
+grep -q '^Names: [1-9][0-9]*$' scan-progress.txt
+if grep -q 'Clang diagnostic counter fixture' scan-progress.txt; then
+  exit 1
+fi

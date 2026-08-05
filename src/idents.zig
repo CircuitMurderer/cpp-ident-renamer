@@ -31,6 +31,38 @@ pub const Selection = struct {
     }
 };
 
+pub const StreamingWriter = struct {
+    file: std.Io.File,
+    count: usize = 0,
+
+    pub fn init(io: std.Io, project_root: []const u8) !StreamingWriter {
+        var project_dir = try std.Io.Dir.cwd().openDir(io, project_root, .{});
+        defer project_dir.close(io);
+
+        return initAt(io, project_dir);
+    }
+
+    fn initAt(io: std.Io, directory: std.Io.Dir) !StreamingWriter {
+        return .{ .file = try directory.createFile(io, file_name, .{}) };
+    }
+
+    pub fn deinit(self: *StreamingWriter, io: std.Io) void {
+        self.file.close(io);
+        self.* = undefined;
+    }
+
+    pub fn append(
+        self: *StreamingWriter,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        diagnostics: []const scanner.Diagnostic,
+    ) !void {
+        for (diagnostics) |diagnostic| {
+            if (try writeDiagnostic(io, allocator, self.file, diagnostic)) self.count += 1;
+        }
+    }
+};
+
 pub fn load(
     io: std.Io,
     allocator: std.mem.Allocator,
@@ -52,45 +84,32 @@ pub fn load(
     return parseOwned(allocator, contents);
 }
 
-pub fn write(
+fn writeDiagnostic(
     io: std.Io,
     allocator: std.mem.Allocator,
-    project_root: []const u8,
-    diagnostics: []const scanner.Diagnostic,
-) !usize {
-    const path = try std.fs.path.join(allocator, &.{ project_root, file_name });
-    defer allocator.free(path);
+    file: std.Io.File,
+    diagnostic: scanner.Diagnostic,
+) !bool {
+    if (!isFixable(diagnostic)) return false;
 
-    const cwd = std.Io.Dir.cwd();
-    var atomic = try cwd.createFileAtomic(io, path, .{ .replace = true });
-    defer atomic.deinit(io);
+    const value = marker(diagnostic);
+    const line = try std.fmt.allocPrint(
+        allocator,
+        "{s}\t{s}\t{s}\t{s}\t{s}:{d}:{d}\n",
+        .{
+            value[0..],
+            @tagName(diagnostic.kind),
+            diagnostic.old_name,
+            diagnostic.suggested_name.?,
+            diagnostic.file,
+            diagnostic.line,
+            diagnostic.column,
+        },
+    );
+    defer allocator.free(line);
 
-    var count: usize = 0;
-    for (diagnostics) |diagnostic| {
-        if (!isFixable(diagnostic)) continue;
-
-        const value = marker(diagnostic);
-        const line = try std.fmt.allocPrint(
-            allocator,
-            "{s}\t{s}\t{s}\t{s}\t{s}:{d}:{d}\n",
-            .{
-                value[0..],
-                @tagName(diagnostic.kind),
-                diagnostic.old_name,
-                diagnostic.suggested_name.?,
-                diagnostic.file,
-                diagnostic.line,
-                diagnostic.column,
-            },
-        );
-        defer allocator.free(line);
-
-        try atomic.file.writeStreamingAll(io, line);
-        count += 1;
-    }
-
-    try atomic.replace(io);
-    return count;
+    try file.writeStreamingAll(io, line);
+    return true;
 }
 
 fn parseOwned(allocator: std.mem.Allocator, contents: []u8) !Selection {
@@ -186,4 +205,32 @@ test "marker changes when the proposed rename changes" {
     second.suggested_name = "badName";
 
     try std.testing.expect(!std.mem.eql(u8, marker(first)[0..], marker(second)[0..]));
+}
+
+test "streaming writer exposes diagnostics before it closes" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    var writer = try StreamingWriter.initAt(io, temporary.dir);
+    defer writer.deinit(io);
+
+    const diagnostic = scanner.Diagnostic{
+        .file = "/project/sample.cpp",
+        .line = 7,
+        .column = 9,
+        .offset = 42,
+        .kind = .variable,
+        .usr = "c:sample.cpp@42@value",
+        .old_name = "value",
+        .suggested_name = "iValue",
+        .type_spelling = "int",
+    };
+    try writer.append(io, allocator, &.{diagnostic});
+
+    const contents = try temporary.dir.readFileAlloc(io, file_name, allocator, .limited(4096));
+    defer allocator.free(contents);
+    try std.testing.expect(std.mem.indexOf(u8, contents, "\tvariable\tvalue\tiValue\t") != null);
+    try std.testing.expectEqual(@as(usize, 1), writer.count);
 }

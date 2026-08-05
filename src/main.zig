@@ -35,6 +35,62 @@ const FixOutcome = struct {
     blocked_symbols: usize = 0,
 };
 
+const ProgressDisplay = struct {
+    interactive: bool,
+    rendered: bool = false,
+
+    fn init(io: std.Io) ProgressDisplay {
+        return .{ .interactive = std.Io.File.stderr().isTty(io) catch false };
+    }
+
+    fn update(self: *ProgressDisplay, io: std.Io, stats: scanner.ProgressStats) !void {
+        if (!self.interactive) return;
+        try self.render(io, stats, self.rendered);
+        self.rendered = true;
+    }
+
+    fn finish(self: *ProgressDisplay, io: std.Io, stats: scanner.ProgressStats) !void {
+        if (self.interactive and self.rendered) return;
+        try self.render(io, stats, false);
+        self.rendered = true;
+    }
+
+    fn render(_: *ProgressDisplay, io: std.Io, stats: scanner.ProgressStats, redraw: bool) !void {
+        var buffer: [256]u8 = undefined;
+        var file_writer: std.Io.File.Writer = .init(.stderr(), io, &buffer);
+        const out = &file_writer.interface;
+
+        if (redraw) try out.writeAll("\x1b[3A");
+        const clear = if (redraw) "\r\x1b[2K" else "";
+        try out.print("{s}Warnings: {d}\n{s}Errors: {d}\n{s}Names: {d}\n", .{
+            clear,
+            stats.warnings,
+            clear,
+            stats.errors,
+            clear,
+            stats.names,
+        });
+        try out.flush();
+    }
+};
+
+const ScanUi = struct {
+    idents_writer: ?*idents.StreamingWriter,
+    progress_display: *ProgressDisplay,
+};
+
+fn updateScanUi(
+    context: *anyopaque,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    diagnostics: []const scanner.Diagnostic,
+    stats: scanner.ProgressStats,
+) !void {
+    const ui: *ScanUi = @ptrCast(@alignCast(context));
+    if (ui.idents_writer) |writer| try writer.append(io, allocator, diagnostics);
+    try ui.progress_display.update(io, stats);
+}
+
 pub fn main(init: std.process.Init) !void {
     const allocator = init.arena.allocator();
     const args = try init.minimal.args.toSlice(allocator);
@@ -65,12 +121,40 @@ fn run(io: std.Io, allocator: std.mem.Allocator, out: *std.Io.Writer, options: O
     var database = try compilation_db.load(io, allocator, options.database_path);
     defer database.deinit();
 
-    var result = try scanner.scan(io, allocator, &database, &config, options.project_root);
-    defer result.deinit(allocator);
+    var idents_writer: ?idents.StreamingWriter = if (options.fix)
+        null
+    else
+        try idents.StreamingWriter.init(io, options.project_root);
+    defer if (idents_writer) |*writer| writer.deinit(io);
 
-    if (!options.fix) {
-        _ = try idents.write(io, allocator, options.project_root, result.diagnostics.items);
-    }
+    var progress_display = ProgressDisplay.init(io);
+    const initial_stats = scanner.ProgressStats{
+        .completed = 0,
+        .total = database.entries.len,
+        .warnings = 0,
+        .errors = 0,
+        .names = 0,
+    };
+    try progress_display.update(io, initial_stats);
+
+    var scan_ui = ScanUi{
+        .idents_writer = if (idents_writer) |*writer| writer else null,
+        .progress_display = &progress_display,
+    };
+    const progress = scanner.ScanProgress{
+        .context = &scan_ui,
+        .translation_unit_finished = updateScanUi,
+    };
+
+    var result = try scanner.scan(io, allocator, &database, &config, options.project_root, progress);
+    defer result.deinit(allocator);
+    try progress_display.finish(io, .{
+        .completed = database.entries.len,
+        .total = database.entries.len,
+        .warnings = result.clang_warnings,
+        .errors = result.clang_errors,
+        .names = result.violationCount(),
+    });
 
     var selection = if (options.fix)
         try idents.load(io, allocator, options.project_root)
@@ -149,7 +233,7 @@ fn performFix(
     var transaction = try fixer.apply(io, allocator, plan.replacements.items);
     defer transaction.deinit(allocator);
 
-    var verification = scanner.scan(io, allocator, database, config, project_root) catch |err| {
+    var verification = scanner.scan(io, allocator, database, config, project_root, null) catch |err| {
         transaction.rollback(io, allocator) catch |rollback_err| {
             std.log.err("verification failed ({t}) and rollback also failed ({t})", .{ err, rollback_err });
             return .{
@@ -262,8 +346,8 @@ fn writeText(out: *std.Io.Writer, result: *const scanner.ScanResult, show_unmapp
         }
     }
     try out.print(
-        "checked {d} translation unit(s): {d} naming violation(s), {d} unmapped type(s), {d} parse failure(s)\n",
-        .{ result.translation_units, result.violationCount(), unmapped_count, result.parse_failures },
+        "checked {d} translation unit(s): {d} naming violation(s), {d} unmapped type(s), {d} Clang warning(s), {d} Clang error(s), {d} parse failure(s)\n",
+        .{ result.translation_units, result.violationCount(), unmapped_count, result.clang_warnings, result.clang_errors, result.parse_failures },
     );
 }
 
@@ -295,6 +379,8 @@ fn writeJson(out: *std.Io.Writer, result: *const scanner.ScanResult, fix_outcome
         translation_units: usize,
         violations: usize,
         unmapped_types: usize,
+        clang_warnings: usize,
+        clang_errors: usize,
         parse_failures: usize,
     };
     var unmapped_count: usize = 0;
@@ -307,6 +393,8 @@ fn writeJson(out: *std.Io.Writer, result: *const scanner.ScanResult, fix_outcome
             .translation_units = result.translation_units,
             .violations = result.violationCount(),
             .unmapped_types = unmapped_count,
+            .clang_warnings = result.clang_warnings,
+            .clang_errors = result.clang_errors,
             .parse_failures = result.parse_failures,
         },
         .fix = fix_outcome,

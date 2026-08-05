@@ -1,6 +1,6 @@
 # cpp-ident-renamer
 
-`cpp-ident-renamer` 是一个用 Zig 和 libclang 实现的 C++ 语义命名检查与重构工具。默认扫描、报告并把可修复项写入项目根目录的 `idents.tsv`；只有显式传入 `--fix` 或 `-f` 才会修改源码。
+`cpp-ident-renamer` 是一个用 Zig 和 libclang 实现的 C++ 语义命名检查与重构工具。默认扫描、报告并把可修复项写入项目根目录的 `idents.tsv`；只有显式传入 `--fix` 或 `-f` 才会修改源码。普通扫描会在启动时清空该文件，并在每个 translation unit 完成后立即追加新结果，不需要等待整个项目扫描结束。
 
 它会读取 `compile_commands.json`，遍历真实的 Clang AST，并检查：
 
@@ -125,9 +125,27 @@ ruby build.rb run -- check -p build --fix
 # -f 是 --fix 的短选项
 ```
 
+大型项目扫描期间可以在另一个终端实时查看已经发现的标记：
+
+```sh
+tail -f idents.tsv
+```
+
+此时按 `Ctrl+C` 中止扫描，已经完整写入的行仍会保留。`--fix` 模式不会清空或追加该文件，仍然只修复文件中原有并且本轮扫描再次发现的标记。
+
+扫描期间不会逐条打印 Clang 的 warning/error 内容。交互式终端会在 stderr 中原地刷新以下三行；重定向输出或在 CI 中运行时只在扫描结束后打印一次，因此不会污染 stdout 的文本或 JSON 报告：
+
+```text
+Warnings: 12
+Errors: 3
+Names: 47
+```
+
+`Warnings` 和 `Errors` 是 Clang 诊断数量，`Names` 是当前已经发现的命名问题数量。Clang error 仍会计入解析失败并阻止不安全的 `--fix`，这里只隐藏冗长的逐条诊断文本，不改变安全判断。
+
 `-p` 既可指向目录，也可直接指向 `compile_commands.json`。默认只报告当前目录下的项目文件；可用 `--root` 指定其他项目根目录。
 
-不带 `--fix` 时，工具每次都会运行完整扫描，并原子覆盖 `<root>/idents.tsv`。它是标准的 Tab 分隔文本文件，可以直接用支持 TSV 的编辑器或表格工具查看。文件每行是一项可修复问题，格式为：
+不带 `--fix` 时，工具每次都会在扫描开始时截断 `<root>/idents.tsv`，随后按 translation unit 逐批追加结果。它是标准的 Tab 分隔文本文件，可以直接用支持 TSV 的编辑器或表格工具实时查看。文件每行是一项可修复问题，格式为：
 
 ```text
 <SHA-256 标记>    <variable|function>    <旧名称>    <建议名称>    <文件>:<行>:<列>
@@ -171,6 +189,9 @@ member = "m_"
 static_member = "m_"
 global = "g_"
 
+[scope_alternatives]
+global = ["upper_snake"] # TIME_ESCAPE 与 g_nTimeEscape 都视为合规
+
 [functions]
 member = "camel"    # camel / snake / unchanged
 free = "camel"
@@ -187,6 +208,8 @@ int = "n"
 ```
 
 `use_canonical_type = true` 会穿透 typedef/using；设为 `false` 时可以直接给别名配置前缀。配置中的类型条目会覆盖同名内置映射。
+
+`[scope_alternatives]` 为变量作用域增加可选的合规风格，不替换 `[scope]` 定义的主规则。目前支持 `upper_snake`，并可分别配置 `member`、`static_member` 和 `global`。如果名称不满足任何替代风格，扫描与 `--fix` 仍使用主规则生成唯一建议名称；因此上述配置同时接受 `TIME_ESCAPE` 和 `g_nTimeEscape`，而 `time_escape` 仍会建议改为 `g_nTimeEscape`。
 
 指针规则的组合顺序固定为 `scope + pointer + type + PascalName`。每增加一级指针就增加一个 `marker`；`[pointers]` 中的类型映射优先于 `[types]`，所以普通 `char` 仍可使用 `ch`，而 `char*` 使用字符串前缀 `s`。例如 `int*` 使用普通 `int = "n"` 映射得到 `m_pnCount`。
 

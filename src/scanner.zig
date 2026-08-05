@@ -26,6 +26,9 @@ pub const ScanResult = struct {
     diagnostics: std.ArrayList(Diagnostic) = .empty,
     translation_units: usize = 0,
     parse_failures: usize = 0,
+    clang_warnings: usize = 0,
+    clang_errors: usize = 0,
+    names: usize = 0,
 
     pub fn deinit(self: *ScanResult, allocator: std.mem.Allocator) void {
         for (self.diagnostics.items) |diagnostic| {
@@ -39,12 +42,27 @@ pub const ScanResult = struct {
     }
 
     pub fn violationCount(self: *const ScanResult) usize {
-        var count: usize = 0;
-        for (self.diagnostics.items) |diagnostic| if (diagnostic.kind != .unmapped_type) {
-            count += 1;
-        };
-        return count;
+        return self.names;
     }
+};
+
+pub const ProgressStats = struct {
+    completed: usize,
+    total: usize,
+    warnings: usize,
+    errors: usize,
+    names: usize,
+};
+
+pub const ScanProgress = struct {
+    context: *anyopaque,
+    translation_unit_finished: *const fn (
+        context: *anyopaque,
+        io: std.Io,
+        allocator: std.mem.Allocator,
+        diagnostics: []const Diagnostic,
+        stats: ProgressStats,
+    ) anyerror!void,
 };
 
 pub const Replacement = struct {
@@ -100,6 +118,7 @@ pub fn scan(
     database: *const compilation_db.Database,
     config: *const config_mod.Config,
     project_root_arg: []const u8,
+    progress: ?ScanProgress,
 ) !ScanResult {
     var result = ScanResult{};
     errdefer result.deinit(allocator);
@@ -117,7 +136,8 @@ pub fn scan(
     const index = c.clang_createIndex(0, 0) orelse return error.CannotCreateClangIndex;
     defer c.clang_disposeIndex(index);
 
-    for (database.entries) |entry| {
+    for (database.entries, 0..) |entry, entry_index| {
+        const diagnostics_start = result.diagnostics.items.len;
         var tu: c.CXTranslationUnit = null;
         var owned_args: std.ArrayList([:0]u8) = .empty;
         defer {
@@ -145,13 +165,25 @@ pub fn scan(
             &tu,
         );
         if (parse_result != c.CXError_Success or tu == null) {
-            std.log.err("failed to parse {s} (libclang error {d})", .{ entry.file, parse_result });
             result.parse_failures += 1;
+            result.clang_errors += 1;
+            if (progress) |observer| try notifyProgress(
+                observer,
+                io,
+                allocator,
+                result.diagnostics.items[diagnostics_start..],
+                &result,
+                entry_index + 1,
+                database.entries.len,
+            );
             continue;
         }
         defer c.clang_disposeTranslationUnit(tu);
         result.translation_units += 1;
-        if (printClangDiagnostics(tu)) result.parse_failures += 1;
+        const clang_diagnostics = countClangDiagnostics(tu);
+        result.clang_warnings += clang_diagnostics.warnings;
+        result.clang_errors += clang_diagnostics.errors;
+        if (clang_diagnostics.errors > 0) result.parse_failures += 1;
 
         var context = Context{
             .allocator = allocator,
@@ -165,10 +197,43 @@ pub fn scan(
         const root = c.clang_getTranslationUnitCursor(tu);
         _ = c.clang_visitChildren(root, visit, &context);
         if (context.callback_error) |err| return err;
+        if (progress) |observer| try notifyProgress(
+            observer,
+            io,
+            allocator,
+            result.diagnostics.items[diagnostics_start..],
+            &result,
+            entry_index + 1,
+            database.entries.len,
+        );
     }
 
     std.mem.sort(Diagnostic, result.diagnostics.items, {}, lessThan);
     return result;
+}
+
+fn notifyProgress(
+    observer: ScanProgress,
+    io: std.Io,
+    allocator: std.mem.Allocator,
+    diagnostics: []const Diagnostic,
+    result: *const ScanResult,
+    completed: usize,
+    total: usize,
+) !void {
+    try observer.translation_unit_finished(
+        observer.context,
+        io,
+        allocator,
+        diagnostics,
+        .{
+            .completed = completed,
+            .total = total,
+            .warnings = result.clang_warnings,
+            .errors = result.clang_errors,
+            .names = result.names,
+        },
+    );
 }
 
 const FixContext = struct {
@@ -569,6 +634,7 @@ fn appendDiagnostic(
         .suggested_name = suggested_name_owned,
         .type_spelling = if (type_spelling) |value| try context.allocator.dupe(u8, value) else null,
     });
+    if (kind != .unmapped_type) context.result.names += 1;
 }
 
 fn cursorString(allocator: std.mem.Allocator, value: c.CXString) ![]u8 {
@@ -645,20 +711,25 @@ fn isCompilerWrapper(path: []const u8) bool {
         std.mem.eql(u8, name, "distcc");
 }
 
-fn printClangDiagnostics(tu: c.CXTranslationUnit) bool {
+const ClangDiagnosticCounts = struct {
+    warnings: usize = 0,
+    errors: usize = 0,
+};
+
+fn countClangDiagnostics(tu: c.CXTranslationUnit) ClangDiagnosticCounts {
     const count = c.clang_getNumDiagnostics(tu);
-    var had_errors = false;
+    var result = ClangDiagnosticCounts{};
     var i: c_uint = 0;
     while (i < count) : (i += 1) {
         const diagnostic = c.clang_getDiagnostic(tu, i) orelse continue;
         defer c.clang_disposeDiagnostic(diagnostic);
-        if (c.clang_getDiagnosticSeverity(diagnostic) < c.CXDiagnostic_Error) continue;
-        had_errors = true;
-        const rendered = c.clang_formatDiagnostic(diagnostic, c.clang_defaultDiagnosticDisplayOptions());
-        defer c.clang_disposeString(rendered);
-        if (c.clang_getCString(rendered)) |message| std.log.err("clang: {s}", .{message});
+        switch (c.clang_getDiagnosticSeverity(diagnostic)) {
+            c.CXDiagnostic_Warning => result.warnings += 1,
+            c.CXDiagnostic_Error, c.CXDiagnostic_Fatal => result.errors += 1,
+            else => {},
+        }
     }
-    return had_errors;
+    return result;
 }
 
 test "detects explicit Clang resource directory arguments" {

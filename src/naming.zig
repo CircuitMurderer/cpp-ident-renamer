@@ -11,6 +11,13 @@ pub fn variableName(
     pointer_depth: usize,
     old_name: []const u8,
 ) !?[]u8 {
+    const alternatives = switch (scope) {
+        .member => config.member_alternatives.items,
+        .static_member => config.static_member_alternatives.items,
+        .global => config.global_alternatives.items,
+    };
+    if (matchesAlternative(alternatives, old_name)) return try allocator.dupe(u8, old_name);
+
     const type_prefix = config.typePrefix(type_spelling, pointer_depth) orelse return null;
     const scope_prefix = switch (scope) {
         .member => config.member_prefix,
@@ -32,6 +39,31 @@ pub fn variableName(
     _ = copyPart(result, position, pascal);
 
     return result;
+}
+
+fn matchesAlternative(alternatives: []const config_mod.VariableStyle, name: []const u8) bool {
+    for (alternatives) |style| switch (style) {
+        .upper_snake => if (isUpperSnake(name)) return true,
+    };
+
+    return false;
+}
+
+fn isUpperSnake(name: []const u8) bool {
+    if (name.len == 0 or !std.ascii.isUpper(name[0])) return false;
+
+    var previous_underscore = false;
+    for (name) |ch| {
+        if (ch == '_') {
+            if (previous_underscore) return false;
+            previous_underscore = true;
+        } else {
+            if (!std.ascii.isUpper(ch) and !std.ascii.isDigit(ch)) return false;
+            previous_underscore = false;
+        }
+    }
+
+    return !previous_underscore;
 }
 
 pub fn functionName(
@@ -186,6 +218,25 @@ test "pointer depth sits between scope and type prefixes" {
     const integer = (try variableName(allocator, &config, .member, "int", 1, "count")).?;
     defer allocator.free(integer);
     try std.testing.expectEqualStrings("m_pnCount", integer);
+}
+
+test "global upper snake is accepted as an alternative" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    try config.global_alternatives.append(allocator, .upper_snake);
+
+    const alternative = (try variableName(allocator, &config, .global, "int", 0, "TIME_ESCAPE")).?;
+    defer allocator.free(alternative);
+    try std.testing.expectEqualStrings("TIME_ESCAPE", alternative);
+
+    const primary = (try variableName(allocator, &config, .global, "int", 0, "g_nTimeEscape")).?;
+    defer allocator.free(primary);
+    try std.testing.expectEqualStrings("g_nTimeEscape", primary);
+
+    const invalid = (try variableName(allocator, &config, .global, "int", 0, "time_escape")).?;
+    defer allocator.free(invalid);
+    try std.testing.expect(!std.mem.eql(u8, "time_escape", invalid));
 }
 
 test "function casing handles PascalCase and initialisms" {
