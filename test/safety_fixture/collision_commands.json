@@ -1,0 +1,14 @@
+[
+  {
+    "directory": ".",
+    "file": "test/safety_fixture/collision.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-c",
+      "test/safety_fixture/collision.cpp",
+      "-o",
+      "test/safety_fixture/collision.o"
+    ]
+  }
+]

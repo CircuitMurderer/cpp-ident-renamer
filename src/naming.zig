@@ -1,0 +1,201 @@
+const std = @import("std");
+const config_mod = @import("config.zig");
+
+pub const VariableScope = enum { member, static_member, global };
+
+pub fn variableName(
+    allocator: std.mem.Allocator,
+    config: *const config_mod.Config,
+    scope: VariableScope,
+    type_spelling: []const u8,
+    pointer_depth: usize,
+    old_name: []const u8,
+) !?[]u8 {
+    const type_prefix = config.typePrefix(type_spelling, pointer_depth) orelse return null;
+    const scope_prefix = switch (scope) {
+        .member => config.member_prefix,
+        .static_member => config.static_member_prefix,
+        .global => config.global_prefix,
+    };
+
+    const base = stripKnownPrefix(config, scope_prefix, type_prefix, pointer_depth, old_name);
+    const pascal = try toPascal(allocator, base);
+    defer allocator.free(pascal);
+
+    const result_len = scope_prefix.len + config.pointer_marker.len * pointer_depth + type_prefix.len + pascal.len;
+    const result = try allocator.alloc(u8, result_len);
+
+    var position: usize = 0;
+    position = copyPart(result, position, scope_prefix);
+    for (0..pointer_depth) |_| position = copyPart(result, position, config.pointer_marker);
+    position = copyPart(result, position, type_prefix);
+    _ = copyPart(result, position, pascal);
+
+    return result;
+}
+
+pub fn functionName(
+    allocator: std.mem.Allocator,
+    function_case: config_mod.FunctionCase,
+    old_name: []const u8,
+) ![]u8 {
+    return switch (function_case) {
+        .lower_camel => toLowerCamel(allocator, old_name),
+        .snake => toSnake(allocator, old_name),
+        .unchanged => allocator.dupe(u8, old_name),
+    };
+}
+
+fn copyPart(output: []u8, position: usize, part: []const u8) usize {
+    @memcpy(output[position..][0..part.len], part);
+    return position + part.len;
+}
+
+fn stripKnownPrefix(
+    config: *const config_mod.Config,
+    scope_prefix: []const u8,
+    type_prefix: []const u8,
+    pointer_depth: usize,
+    name: []const u8,
+) []const u8 {
+    var result = name;
+    if (std.mem.startsWith(u8, result, scope_prefix)) {
+        result = result[scope_prefix.len..];
+    } else inline for (.{ config.member_prefix, config.static_member_prefix, config.global_prefix }) |known_scope| {
+        if (known_scope.len > 0 and std.mem.startsWith(u8, result, known_scope)) {
+            result = result[known_scope.len..];
+            break;
+        }
+    }
+
+    var expected_end: usize = 0;
+    for (0..pointer_depth) |_| {
+        if (!std.mem.startsWith(u8, result[expected_end..], config.pointer_marker)) break;
+        expected_end += config.pointer_marker.len;
+    }
+    if (expected_end == config.pointer_marker.len * pointer_depth and
+        hasConventionPrefix(result[expected_end..], type_prefix))
+        return result[expected_end + type_prefix.len ..];
+
+    var after_pointers: usize = 0;
+    while (config.pointer_marker.len > 0 and
+        std.mem.startsWith(u8, result[after_pointers..], config.pointer_marker))
+    {
+        after_pointers += config.pointer_marker.len;
+    }
+    if (after_pointers > 0) {
+        if (stripMappedPrefix(config.pointer_mappings.items, result[after_pointers..])) |base| return base;
+        if (stripMappedPrefix(config.mappings.items, result[after_pointers..])) |base| return base;
+    }
+
+    if (stripMappedPrefix(config.pointer_mappings.items, result)) |base| return base;
+    if (stripMappedPrefix(config.mappings.items, result)) |base| return base;
+    return result;
+}
+
+fn stripMappedPrefix(mappings: []const config_mod.TypeMapping, name: []const u8) ?[]const u8 {
+    for (mappings) |mapping| if (hasConventionPrefix(name, mapping.prefix))
+        return name[mapping.prefix.len..];
+    return null;
+}
+
+fn hasConventionPrefix(name: []const u8, prefix: []const u8) bool {
+    return prefix.len > 0 and name.len > prefix.len and std.mem.startsWith(u8, name, prefix) and
+        std.ascii.isUpper(name[prefix.len]);
+}
+
+fn toPascal(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    var capitalize = true;
+    for (input) |ch| {
+        if (ch == '_' or ch == '-' or ch == ' ') {
+            capitalize = true;
+            continue;
+        }
+        try out.append(allocator, if (capitalize) std.ascii.toUpper(ch) else ch);
+        capitalize = false;
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+fn toLowerCamel(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    const pascal = try toPascal(allocator, input);
+    if (pascal.len == 0) return pascal;
+
+    var run: usize = 0;
+    while (run < pascal.len and std.ascii.isUpper(pascal[run])) : (run += 1) {}
+
+    const lower_count = if (run > 1 and run < pascal.len) run - 1 else run;
+    for (pascal[0..lower_count]) |*ch| ch.* = std.ascii.toLower(ch.*);
+
+    return pascal;
+}
+
+fn toSnake(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(allocator);
+
+    for (input, 0..) |ch, i| {
+        if (ch == '-' or ch == ' ') {
+            if (out.items.len > 0 and out.items[out.items.len - 1] != '_') try out.append(allocator, '_');
+            continue;
+        }
+        if (std.ascii.isUpper(ch) and i > 0 and input[i - 1] != '_' and
+            (!std.ascii.isUpper(input[i - 1]) or (i + 1 < input.len and std.ascii.isLower(input[i + 1]))))
+            try out.append(allocator, '_');
+        try out.append(allocator, std.ascii.toLower(ch));
+    }
+
+    return out.toOwnedSlice(allocator);
+}
+
+test "variable naming strips an existing convention" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    const first = (try variableName(allocator, &config, .member, "int", 0, "numberOfSlice")).?;
+    defer allocator.free(first);
+    try std.testing.expectEqualStrings("m_nNumberOfSlice", first);
+
+    const second = (try variableName(allocator, &config, .member, "int", 0, "m_sNumberOfSlice")).?;
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings("m_nNumberOfSlice", second);
+}
+
+test "pointer depth sits between scope and type prefixes" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    const member = (try variableName(allocator, &config, .member, "char", 1, "name")).?;
+    defer allocator.free(member);
+    try std.testing.expectEqualStrings("m_psName", member);
+
+    const global = (try variableName(allocator, &config, .global, "const char", 2, "names")).?;
+    defer allocator.free(global);
+    try std.testing.expectEqualStrings("g_ppsNames", global);
+
+    const corrected = (try variableName(allocator, &config, .member, "char", 1, "m_pchName")).?;
+    defer allocator.free(corrected);
+    try std.testing.expectEqualStrings("m_psName", corrected);
+
+    const integer = (try variableName(allocator, &config, .member, "int", 1, "count")).?;
+    defer allocator.free(integer);
+    try std.testing.expectEqualStrings("m_pnCount", integer);
+}
+
+test "function casing handles PascalCase and initialisms" {
+    const allocator = std.testing.allocator;
+
+    const normal = try functionName(allocator, .lower_camel, "GetSize");
+    defer allocator.free(normal);
+    try std.testing.expectEqualStrings("getSize", normal);
+
+    const acronym = try functionName(allocator, .lower_camel, "HTTPServer");
+    defer allocator.free(acronym);
+    try std.testing.expectEqualStrings("httpServer", acronym);
+}

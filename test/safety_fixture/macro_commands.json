@@ -1,0 +1,14 @@
+[
+  {
+    "directory": ".",
+    "file": "test/safety_fixture/macro.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-c",
+      "test/safety_fixture/macro.cpp",
+      "-o",
+      "test/safety_fixture/macro.o"
+    ]
+  }
+]

@@ -1,0 +1,15 @@
+[
+  {
+    "directory": ".",
+    "file": "test/fixture/sample.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-Itest/fixture",
+      "-c",
+      "test/fixture/sample.cpp",
+      "-o",
+      "test/fixture/sample.o"
+    ]
+  }
+]

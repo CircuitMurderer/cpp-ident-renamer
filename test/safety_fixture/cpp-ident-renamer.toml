@@ -1,0 +1,13 @@
+use_canonical_type = true
+
+[scope]
+member = "m_"
+static_member = "m_"
+global = "g_"
+
+[functions]
+member = "camel"
+free = "camel"
+
+[types]
+int = "n"

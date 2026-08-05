@@ -1,0 +1,15 @@
+.{
+    .name = .cpp_ident_renamer,
+    .version = "0.1.0",
+    .fingerprint = 0x4c3bc002a5f13d22,
+    .minimum_zig_version = "0.16.0",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "src",
+        "test",
+        "README.md",
+        "cpp-ident-renamer.toml.example",
+        "zls.build.json",
+    },
+}

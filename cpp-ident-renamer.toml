@@ -1,0 +1,27 @@
+# Project-specific configuration for cpp-ident-renamer.
+use_canonical_type = true
+
+[scope]
+member = "m_"
+static_member = "m_"
+global = "g_"
+
+[functions]
+member = "camel"
+free = "camel"
+
+[pointers]
+marker = "p"
+char = "s" # char* -> ps, char** -> pps
+
+[types]
+int = "n"
+bool = "b"
+double = "d"
+"std::string" = "s"
+"std::basic_string<char>" = "s"
+"std::vector" = "vec"
+"std::map" = "map"
+"project::Request" = "req"
+"project::Response" = "rsp"
+"project::Context" = "ctx"
