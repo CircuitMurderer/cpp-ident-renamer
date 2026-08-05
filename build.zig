@@ -8,6 +8,13 @@ pub fn build(b: *std.Build) void {
         "llvm-prefix",
         "LLVM installation prefix containing include/clang-c and lib/libclang",
     );
+    const clang_resource_dir = b.option(
+        []const u8,
+        "clang-resource-dir",
+        "Clang resource directory containing include/stddef.h",
+    ) orelse "";
+    const build_options = b.addOptions();
+    build_options.addOption([]const u8, "clang_resource_dir", clang_resource_dir);
 
     const root_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
@@ -16,6 +23,7 @@ pub fn build(b: *std.Build) void {
     });
     root_module.link_libc = true;
     root_module.linkSystemLibrary("clang", .{});
+    root_module.addOptions("build_options", build_options);
 
     if (llvm_prefix) |prefix| {
         root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
@@ -35,20 +43,20 @@ pub fn build(b: *std.Build) void {
     const run_step = b.step("run", "Run cpp-ident-renamer");
     run_step.dependOn(&run_cmd.step);
 
-    const tests = b.addTest(.{
-        .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
-            .target = target,
-            .optimize = optimize,
-        }),
+    const test_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
     });
-    tests.root_module.link_libc = true;
-    tests.root_module.linkSystemLibrary("clang", .{});
+    test_module.link_libc = true;
+    test_module.linkSystemLibrary("clang", .{});
+    test_module.addOptions("build_options", build_options);
     if (llvm_prefix) |prefix| {
-        tests.root_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
-        tests.root_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
-        tests.root_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        test_module.addIncludePath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "include" }) });
+        test_module.addLibraryPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
+        test_module.addRPath(.{ .cwd_relative = b.pathJoin(&.{ prefix, "lib" }) });
     }
+    const tests = b.addTest(.{ .root_module = test_module });
     const test_run = b.addRunArtifact(tests);
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&test_run.step);

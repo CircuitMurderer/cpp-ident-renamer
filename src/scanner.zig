@@ -2,6 +2,7 @@ const std = @import("std");
 const config_mod = @import("config.zig");
 const compilation_db = @import("compilation_db.zig");
 const naming = @import("naming.zig");
+const build_options = @import("build_options");
 
 const c = @cImport({
     @cInclude("clang-c/Index.h");
@@ -598,6 +599,13 @@ fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, o
     const compiler_index: usize = if (entry.arguments.len > 1 and isCompilerWrapper(entry.arguments[0])) 1 else 0;
     try output.append(allocator, try allocator.dupeZ(u8, entry.arguments[compiler_index]));
     try output.append(allocator, try std.fmt.allocPrintSentinel(allocator, "-working-directory={s}", .{entry.directory}, 0));
+    if (build_options.clang_resource_dir.len > 0 and !hasResourceDirArgument(entry.arguments, compiler_index + 1)) {
+        try output.append(
+            allocator,
+            try std.fmt.allocPrintSentinel(allocator, "-resource-dir={s}", .{build_options.clang_resource_dir}, 0),
+        );
+    }
+
     var i: usize = compiler_index + 1;
     while (i < entry.arguments.len) : (i += 1) {
         const arg = entry.arguments[i];
@@ -615,6 +623,20 @@ fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, o
         }
         try output.append(allocator, try allocator.dupeZ(u8, arg));
     }
+}
+
+fn hasResourceDirArgument(arguments: []const []const u8, start: usize) bool {
+    if (start >= arguments.len) return false;
+
+    for (arguments[start..]) |arg| {
+        if (std.mem.eql(u8, arg, "-resource-dir") or std.mem.eql(u8, arg, "--resource-dir") or
+            std.mem.startsWith(u8, arg, "-resource-dir=") or std.mem.startsWith(u8, arg, "--resource-dir="))
+        {
+            return true;
+        }
+    }
+
+    return false;
 }
 
 fn isCompilerWrapper(path: []const u8) bool {
@@ -637,4 +659,10 @@ fn printClangDiagnostics(tu: c.CXTranslationUnit) bool {
         if (c.clang_getCString(rendered)) |message| std.log.err("clang: {s}", .{message});
     }
     return had_errors;
+}
+
+test "detects explicit Clang resource directory arguments" {
+    try std.testing.expect(hasResourceDirArgument(&.{ "clang++", "-resource-dir", "/opt/llvm/lib/clang/18" }, 1));
+    try std.testing.expect(hasResourceDirArgument(&.{ "clang++", "--resource-dir=/opt/llvm/lib/clang/18" }, 1));
+    try std.testing.expect(!hasResourceDirArgument(&.{ "clang++", "-std=c++17" }, 1));
 }

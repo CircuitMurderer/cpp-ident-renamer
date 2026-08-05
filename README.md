@@ -33,7 +33,7 @@ ruby build.rb build
 ruby build.rb doctor
 ```
 
-Linux 上 `doctor` 会显示检测到的内核、glibc 版本及各自最低要求。安装 LLVM 时还会实际运行私有目录中的 `clang --version`；安装离线 Zig 时会实际运行 `zig version`，任一工具存在架构或运行库不兼容都会在编译前终止。
+Linux 上 `doctor` 会显示检测到的内核、glibc 版本及各自最低要求。安装 LLVM 时还会实际运行私有目录中的 `clang --version`；安装离线 Zig 时会实际运行 `zig version`，任一工具存在架构或运行库不兼容都会在编译前终止。构建脚本还会自动查找私有 LLVM 的 `lib/clang/<版本>/include/stddef.h`，把对应 resource directory 固化进工具；扫描时不依赖系统安装 Clang，也不会误去 `/usr/include` 寻找 Clang builtin headers。
 
 Zig 0.16.0 保持不变。Zig 自带用于编译和 `@cImport` 的 Clang/LLVM 21，不需要在目标机另外安装 Clang 21；外部 LLVM 18.1.8 只提供运行时扫描 C++ AST 的稳定 libclang C API，两者不要求主版本一致。编辑器可以继续使用单独安装的 clangd 22，它也不参与本工具的链接和运行。
 
@@ -51,7 +51,9 @@ VS Code/ZLS 分析 `@cImport` 时也需要同一个构建选项。仓库根目�
 Ruby 脚本实际执行的命令会逐条打印，便于调试。更多选项（离线缓存、自定义 LLVM 下载地址和强制重装）可运行 `ruby build.rb help` 查看。仍可绕过包装器直接运行 Zig：
 
 ```sh
-zig build -Dllvm-prefix="$PWD/.tools/llvm/current"
+zig build \
+  -Dllvm-prefix="$PWD/.tools/llvm/current" \
+  -Dclang-resource-dir="$PWD/.tools/llvm/current/lib/clang/18"
 ```
 
 清理下载缓存、未完成的下载、Zig 构建缓存、`zig-out/` 和 `dist/`：

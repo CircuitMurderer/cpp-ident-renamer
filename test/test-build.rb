@@ -67,4 +67,22 @@ class BuildScriptTest < Minitest::Test
     assert_includes targets, TOOLS_ROOT
     refute_includes targets, DOWNLOAD_ROOT
   end
+
+  def test_finds_the_clang_resource_directory
+    Dir.mktmpdir("cpp-ident-renamer-resource-") do |prefix|
+      expected = File.join(prefix, "lib", "clang", "18")
+      FileUtils.mkdir_p(File.join(expected, "include"))
+      FileUtils.touch(File.join(expected, "include", "stddef.h"))
+
+      assert_equal expected, clang_resource_dir(prefix)
+    end
+  end
+
+  def test_rejects_an_llvm_prefix_without_builtin_headers
+    Dir.mktmpdir("cpp-ident-renamer-resource-") do |prefix|
+      error = assert_raises(BootstrapError) { clang_resource_dir(prefix) }
+
+      assert_includes error.message, "include/stddef.h"
+    end
+  end
 end

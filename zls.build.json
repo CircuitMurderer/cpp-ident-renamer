@@ -3,6 +3,10 @@
     {
       "name": "llvm-prefix",
       "value": ".tools/llvm/current"
+    },
+    {
+      "name": "clang-resource-dir",
+      "value": ".tools/llvm/current/lib/clang/18"
     }
   ]
 }

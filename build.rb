@@ -483,6 +483,27 @@ def shared_libclang(prefix)
   candidates.find { |path| File.file?(path) && path !~ /\.a\z/ }
 end
 
+def clang_resource_dir(prefix)
+  candidates = %w[lib lib64].flat_map do |library_directory|
+    root = File.join(File.expand_path(prefix), library_directory, "clang")
+    next [] unless File.directory?(root)
+
+    Dir.children(root).each_with_object([]) do |version, found|
+      candidate = File.join(root, version)
+      builtin_header = File.join(candidate, "include", "stddef.h")
+      found << candidate if File.file?(builtin_header)
+    end
+  end
+
+  selected = candidates.max_by do |candidate|
+    File.basename(candidate).scan(/\d+/).map(&:to_i)
+  end
+  return selected if selected
+
+  raise BootstrapError,
+        "Clang resource directory was not found beneath #{File.expand_path(prefix)}; expected lib/clang/<version>/include/stddef.h"
+end
+
 def validate_prefix!(prefix, run_clang: true)
   absolute = File.expand_path(prefix)
   required = [
@@ -497,6 +518,7 @@ def validate_prefix!(prefix, run_clang: true)
     raise BootstrapError, "Incomplete LLVM prefix #{absolute}; missing:\n  #{missing.join("\n  ")}"
   end
 
+  clang_resource_dir(absolute)
   return absolute unless run_clang
 
   output, status = Open3.capture2e(File.join(absolute, "bin", "clang"), "--version")
@@ -817,11 +839,14 @@ def run_command!(command)
 end
 
 def zig_with_prefix(prefix, arguments)
-  option = "-Dllvm-prefix=#{File.expand_path(prefix)}"
+  options = [
+    "-Dllvm-prefix=#{File.expand_path(prefix)}",
+    "-Dclang-resource-dir=#{clang_resource_dir(prefix)}"
+  ]
   result = arguments.dup
   separator = result.index("--")
 
-  separator ? result.insert(separator, option) : result.push(option)
+  separator ? result.insert(separator, *options) : result.concat(options)
 
   result
 end
@@ -877,6 +902,7 @@ def doctor(options)
   say("LLVM prefix: #{prefix}")
   say("Clang: #{output.lines.first.to_s.strip}")
   say("libclang: #{shared_libclang(prefix)}")
+  say("Clang resource directory: #{clang_resource_dir(prefix)}")
 end
 
 def clean_targets(remove_toolchains:)
