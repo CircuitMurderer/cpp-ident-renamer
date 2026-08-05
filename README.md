@@ -20,18 +20,24 @@
 - 支持 `.tar.xz` 的 `tar`（常见 Linux/macOS 默认提供）
 - CMake 项目通常用 `-DCMAKE_EXPORT_COMPILE_COMMANDS=on` 生成 compilation database
 
-不要求系统预装 Clang/libclang。项目根目录的 Ruby 构建脚本会下载 LLVM 官方预编译包到 `.tools/llvm/`，校验 SHA-256，解压后让 Zig 从这个私有目录查找头文件和 `libclang`：
+不要求系统预装 Clang/libclang。项目根目录的 Ruby 构建脚本会下载 LLVM release 预编译包到 `.tools/llvm/`，校验 SHA-256，解压后让 Zig 从这个私有目录查找头文件和 `libclang`：
 
 ```sh
 ruby build.rb install
 ruby build.rb build
 ```
 
-默认固定 LLVM 22.1.6，支持 Linux x86_64、Linux ARM64 和 macOS Apple Silicon。官方压缩包约为 1.4–1.9 GiB，下载缓存和解压目录会同时保留，建议预留约 10 GiB 空间。缓存位于 `.tools/downloads/`，下载中断后再次执行会从 `.part` 文件续传。仓库不会修改系统目录，也不需要 `sudo`。运行以下命令可以检查当前环境，且不会触发下载：
+默认固定 LLVM 18.1.8，支持 Linux x86_64、Linux ARM64 和 macOS Apple Silicon。Linux x86_64 使用 Ubuntu 18.04 构建，最低要求 glibc 2.27，可运行于 glibc 2.28 的 Kylin Linux Advanced Server V10。压缩包约为 0.8–1.0 GiB，下载缓存和解压目录会同时保留，建议预留约 10 GiB 空间。缓存位于 `.tools/downloads/`，下载中断后再次执行会从 `.part` 文件续传。仓库不会修改系统目录，也不需要 `sudo`。运行以下命令可以检查当前环境，且不会触发下载：
 
 ```sh
 ruby build.rb doctor
 ```
+
+Linux 上 `doctor` 会显示检测到的内核、glibc 版本及各自最低要求。安装 LLVM 时还会实际运行私有目录中的 `clang --version`；安装离线 Zig 时会实际运行 `zig version`，任一工具存在架构或运行库不兼容都会在编译前终止。
+
+Zig 0.16.0 保持不变。Zig 自带用于编译和 `@cImport` 的 Clang/LLVM 21，不需要在目标机另外安装 Clang 21；外部 LLVM 18.1.8 只提供运行时扫描 C++ AST 的稳定 libclang C API，两者不要求主版本一致。编辑器可以继续使用单独安装的 clangd 22，它也不参与本工具的链接和运行。
+
+Zig 当前官方 Linux 支持基线是内核 5.10，但这不是类似 glibc 符号版本的加载硬门槛。已确认 Zig 0.16.0 可以在目标 Kylin 4.19 内核上启动，因此构建脚本只在 `doctor` 中提示“超出官方支持范围”，不会阻止安装或编译。4.19 环境仍应至少完整执行一次 `ruby build.rb test`：它不仅运行 `zig version`，还会编译、链接并实际运行本工具的单元、端到端和修复安全测试。全部通过即可继续保留 Zig 0.16.0；若实际测试暴露内核相关错误，再考虑降级 Zig。
 
 如果机器已经有可用的 LLVM，也可以跳过下载。这个选项同样适合开发时临时覆盖：
 
@@ -48,6 +54,20 @@ Ruby 脚本实际执行的命令会逐条打印，便于调试。更多选项（
 zig build -Dllvm-prefix="$PWD/.tools/llvm/current"
 ```
 
+清理下载缓存、未完成的下载、Zig 构建缓存、`zig-out/` 和 `dist/`：
+
+```sh
+ruby build.rb clean
+```
+
+默认保留已经安装在 `.tools/llvm/` 和 `.tools/zig/` 中的本地工具链，避免下次重新解压。需要完全重置时使用：
+
+```sh
+ruby build.rb clean --all
+```
+
+`--all` 还会删除本地安装的 LLVM、Zig 和离线清单；之后必须重新下载安装，或者从原始离线包重新解包。
+
 ## Linux 纯内网部署
 
 在可访问互联网的机器上执行：
@@ -60,7 +80,7 @@ ruby build.rb --pack-offline linux-x64
 ruby build.rb --pack-offline linux-arm64
 ```
 
-也可以写成 `ruby build.rb --pack-offline --offline-target linux-arm64`。命令会为指定架构下载并校验 LLVM 22.1.6 和 Zig 0.16.0，然后在 `dist/` 生成对应文件：
+也可以写成 `ruby build.rb --pack-offline --offline-target linux-arm64`。命令会为指定架构下载并校验 LLVM 18.1.8 和 Zig 0.16.0，然后在 `dist/` 生成对应文件：
 
 ```text
 cpp-ident-renamer-offline-linux-x64.tar
@@ -83,7 +103,7 @@ cd cpp-ident-renamer-offline-linux-x64
 ruby build.rb build
 ```
 
-ARM64 包使用同样流程，只需把文件名中的 `linux-x64` 换成 `linux-arm64`。解包后的项目会自动进入离线模式：不再访问网络，先分别验证 LLVM/Zig 的 SHA-256，再安装到 `.tools/` 并使用包内 Zig 编译。内网机器不需要系统 Clang、libclang 或 Zig；仍需 Ruby 2.6+、支持 xz 的 tar，以及与官方 LLVM 二进制兼容的对应 Linux 架构/glibc 环境。首次解包和编译建议预留约 12 GiB 空间。
+ARM64 包使用同样流程，只需把文件名中的 `linux-x64` 换成 `linux-arm64`。解包后的项目会自动进入离线模式：不再访问网络，先分别验证 LLVM/Zig 的 SHA-256，再安装到 `.tools/` 并使用包内 Zig 编译。内网机器不需要系统 Clang、libclang、Zig、新版 GCC 或 Clang 21；仍需 Ruby 2.6+、支持 xz 的 tar，以及对应的 Linux 架构。Linux x64 还要求 glibc 2.27 或更新版本。低于 Linux 5.10 属于 Zig 官方支持范围之外，但不会被脚本硬性拦截。首次解包和编译建议预留约 12 GiB 空间。
 
 ## 使用
 

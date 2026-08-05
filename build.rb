@@ -21,9 +21,12 @@ ZIG_ROOT = File.join(TOOLS_ROOT, "zig")
 DOWNLOAD_ROOT = File.join(TOOLS_ROOT, "downloads")
 OFFLINE_MANIFEST_PATH = File.join(TOOLS_ROOT, "offline-manifest.json")
 DIST_ROOT = File.join(ROOT, "dist")
-DEFAULT_LLVM_VERSION = "22.1.6"
+ZIG_CACHE_ROOT = File.join(ROOT, ".zig-cache")
+ZIG_OUTPUT_ROOT = File.join(ROOT, "zig-out")
+DEFAULT_LLVM_VERSION = "18.1.8"
 DEFAULT_ZIG_VERSION = "0.16.0"
 DEFAULT_OFFLINE_TARGET = "linux-x86_64"
+ZIG_SUPPORTED_LINUX_KERNEL = "5.10"
 
 OFFLINE_TARGET_ALIASES = {
   "x64" => "linux-x86_64",
@@ -49,24 +52,28 @@ OFFLINE_PROJECT_ENTRIES = %w[
   zls.build.json
 ].freeze
 
-# These values are pinned to the official LLVM 22.1.6 release so libclang and
-# clangd can use the same version across every supported platform.
+# These values are pinned to LLVM 18.1.8 release assets. The Linux x86_64
+# archive was built on Ubuntu 18.04 so it can run on glibc 2.27 and newer.
 DEFAULT_ASSETS = {
   "linux-x86_64" => {
-    "name" => "LLVM-22.1.6-Linux-X64.tar.xz",
-    "size" => 1_937_446_204,
-    "sha256" => "c5ac8ef89ca39d30cb32e9b83772f995dd891c685ebc188d593c943a64d5f8b5"
+    "name" => "clang+llvm-18.1.8-x86_64-linux-gnu-ubuntu-18.04.tar.xz",
+    "size" => 1_044_930_068,
+    "sha256" => "54ec30358afcc9fb8aa74307db3046f5187f9fb89fb37064cdde906e062ebf36"
   },
   "linux-aarch64" => {
-    "name" => "LLVM-22.1.6-Linux-ARM64.tar.xz",
-    "size" => 1_770_949_840,
-    "sha256" => "b67817634e8e1c2632dfc056af14d61b94f8e6502f4e557560eea227aa22ce37"
+    "name" => "clang+llvm-18.1.8-aarch64-linux-gnu.tar.xz",
+    "size" => 1_051_625_508,
+    "sha256" => "dcaa1bebbfbb86953fdfbdc7f938800229f75ad26c5c9375ef242edad737d999"
   },
   "darwin-aarch64" => {
-    "name" => "LLVM-22.1.6-macOS-ARM64.tar.xz",
-    "size" => 1_480_006_836,
-    "sha256" => "8059d9d9eeb059c30d812b4a37291888f8dcba04d2b5ace61fd12d2904eaa0e9"
+    "name" => "clang+llvm-18.1.8-arm64-apple-macos11.tar.xz",
+    "size" => 838_639_376,
+    "sha256" => "4573b7f25f46d2a9c8882993f091c52f416c83271db6f5b213c93f0bd0346a10"
   }
+}.freeze
+
+MIN_GLIBC_BY_TARGET = {
+  "linux-x86_64" => "2.27"
 }.freeze
 
 # Pinned from the official Zig 0.16.0 download index.
@@ -115,10 +122,58 @@ def platform_key
 
   key = "#{os_name}-#{cpu_name}"
   unless DEFAULT_ASSETS.key?(key)
-    raise BootstrapError, "No supported official LLVM binary package is available for #{key}"
+    raise BootstrapError, "No supported LLVM release package is available for #{key}"
   end
 
   key
+end
+
+def linux_glibc_version
+  return nil unless RbConfig::CONFIG.fetch("host_os").match?(/linux/i)
+
+  output, status = Open3.capture2e("getconf", "GNU_LIBC_VERSION")
+  return nil unless status.success?
+
+  match = output.match(/glibc\s+(\d+)\.(\d+)/i)
+  match && [match[1].to_i, match[2].to_i]
+rescue Errno::ENOENT
+  nil
+end
+
+def linux_kernel_version
+  return nil unless RbConfig::CONFIG.fetch("host_os").match?(/linux/i)
+
+  output, status = Open3.capture2e("uname", "-r")
+  return nil unless status.success?
+
+  match = output.match(/\A(\d+)\.(\d+)/)
+  match && [match[1].to_i, match[2].to_i]
+rescue Errno::ENOENT
+  nil
+end
+
+def format_version(version)
+  version.join(".")
+end
+
+def version_at_least?(actual, minimum)
+  (actual <=> minimum) >= 0
+end
+
+def validate_runtime_baseline!(key)
+  minimum_text = MIN_GLIBC_BY_TARGET[key]
+  return unless minimum_text
+
+  actual = linux_glibc_version
+  unless actual
+    raise BootstrapError, "Unable to detect glibc; the bundled LLVM #{DEFAULT_LLVM_VERSION} package requires glibc #{minimum_text} or newer"
+  end
+
+  minimum = minimum_text.split(".").map(&:to_i)
+  return if version_at_least?(actual, minimum)
+
+  raise BootstrapError,
+        "glibc #{format_version(actual)} is too old; the bundled LLVM #{DEFAULT_LLVM_VERSION} package requires glibc #{minimum_text} or newer"
 end
 
 def normalize_offline_target(value)
@@ -560,6 +615,7 @@ end
 
 def install_local_llvm(options)
   key = platform_key
+  validate_runtime_baseline!(key)
   target = File.join(LLVM_ROOT, "#{DEFAULT_LLVM_VERSION}-#{key}")
   lock_path = File.join(TOOLS_ROOT, "llvm-install.lock")
 
@@ -772,8 +828,29 @@ end
 
 def doctor(options)
   say("Project directory: #{ROOT}")
-  say("Platform: #{platform_key}")
+  key = platform_key
+  say("Platform: #{key}")
   say("Ruby: #{RUBY_DESCRIPTION}")
+
+  if key.start_with?("linux-")
+    kernel = linux_kernel_version
+    if kernel
+      minimum = ZIG_SUPPORTED_LINUX_KERNEL.split(".").map(&:to_i)
+      support = version_at_least?(kernel, minimum) ? "supported" : "outside official support"
+      say("Linux kernel: #{format_version(kernel)} (Zig support baseline: #{ZIG_SUPPORTED_LINUX_KERNEL}; #{support})")
+    else
+      say("Linux kernel: not detected; Zig #{DEFAULT_ZIG_VERSION} compatibility cannot be verified")
+    end
+
+    glibc = linux_glibc_version
+    minimum = MIN_GLIBC_BY_TARGET[key]
+    if glibc
+      suffix = minimum ? " (LLVM minimum: #{minimum})" : ""
+      say("glibc: #{format_version(glibc)}#{suffix}")
+    else
+      say("glibc: not detected; the downloaded LLVM package may be incompatible")
+    end
+  end
 
   begin
     zig = selected_zig(options, auto_install: false)
@@ -802,6 +879,40 @@ def doctor(options)
   say("libclang: #{shared_libclang(prefix)}")
 end
 
+def clean_targets(remove_toolchains:)
+  build_artifacts = [ZIG_CACHE_ROOT, ZIG_OUTPUT_ROOT, DIST_ROOT]
+  return build_artifacts + [TOOLS_ROOT] if remove_toolchains
+
+  build_artifacts + [DOWNLOAD_ROOT]
+end
+
+def remove_project_path!(path)
+  expanded = File.expand_path(path)
+  project_prefix = "#{File.expand_path(ROOT)}#{File::SEPARATOR}"
+  unless expanded.start_with?(project_prefix)
+    raise BootstrapError, "Refusing to remove a path outside the project: #{expanded}"
+  end
+
+  return false unless File.exist?(expanded) || File.symlink?(expanded)
+
+  FileUtils.rm_rf(expanded)
+  say("Removed #{expanded}")
+  true
+end
+
+def clean(options)
+  removed = clean_targets(remove_toolchains: options[:clean_all]).count do |path|
+    remove_project_path!(path)
+  end
+
+  say("Nothing to clean") if removed.zero?
+  if options[:clean_all]
+    say("Removed downloaded archives, build outputs, and installed local toolchains")
+  else
+    say("Installed LLVM and Zig were preserved; use clean --all to remove them too")
+  end
+end
+
 def usage
   <<~TEXT
     Usage: ruby build.rb <command> [options] [Zig arguments]
@@ -812,11 +923,13 @@ def usage
       run        Build and run the tool; example: ruby build.rb run -- check -p build
       test       Run unit, end-to-end, and fix safety tests
       doctor     Show Ruby, Zig, and local LLVM status without downloading
+      clean      Remove downloads and build outputs; keep installed toolchains
 
     Installation options:
       --llvm-prefix PATH    Use an existing LLVM without downloading; also available as CPP_IDENT_RENAMER_LLVM_PREFIX
       --offline             Use only a previously verified download cache
       --force               Preserve the old installation as .previous-* and reinstall
+      --all                 With clean, also remove installed local LLVM and Zig
       --llvm-url URL        Use a custom archive; requires --llvm-sha256
       --llvm-sha256 HEX     SHA-256 of the custom archive
       --pack-offline [TARGET]
@@ -831,7 +944,7 @@ def usage
 end
 
 def parse_arguments(arguments)
-  commands = %w[install bootstrap build run test doctor help]
+  commands = %w[install bootstrap build run test doctor clean help]
   command = if arguments.empty? || arguments.first.start_with?("-")
               "build"
             else
@@ -850,6 +963,7 @@ def parse_arguments(arguments)
     offline_target: ENV.fetch("CPP_IDENT_RENAMER_OFFLINE_TARGET", DEFAULT_OFFLINE_TARGET),
     offline: File.file?(OFFLINE_MANIFEST_PATH),
     pack_offline: false,
+    clean_all: false,
     force: false
   }
 
@@ -896,6 +1010,12 @@ def parse_arguments(arguments)
       end
     when "--force"
       options[:force] = true
+    when "--all"
+      if command == "clean"
+        options[:clean_all] = true
+      else
+        passthrough << argument
+      end
     else
       passthrough << argument
     end
@@ -906,8 +1026,8 @@ def parse_arguments(arguments)
   [command, options, passthrough]
 end
 
-begin
-  command, options, passthrough = parse_arguments(ARGV.dup)
+def main(arguments)
+  command, options, passthrough = parse_arguments(arguments)
 
   if command == "help"
     puts usage
@@ -921,6 +1041,11 @@ begin
 
   if command == "doctor"
     doctor(options)
+    exit 0
+  end
+
+  if command == "clean"
+    clean(options)
     exit 0
   end
 
@@ -944,6 +1069,7 @@ begin
   when "build"
     run_command!([zig, "build"] + zig_with_prefix(prefix, passthrough))
   when "test"
+    run_command!([RbConfig.ruby, File.join(ROOT, "test", "test-build.rb")])
     steps = %w[test test-e2e test-fix]
     run_command!([zig, "build"] + steps + zig_with_prefix(prefix, passthrough))
   when "run"
@@ -960,10 +1086,16 @@ begin
     command_line += ["--"] + program_arguments
     run_command!(command_line)
   end
-rescue BootstrapError => error
-  warn("[cpp-ident-renamer] Error: #{error.message}")
-  exit 1
-rescue Interrupt
-  warn("\n[cpp-ident-renamer] Interrupted; the unfinished download remains as .part and will resume next time")
-  exit 130
+end
+
+if $PROGRAM_NAME == __FILE__
+  begin
+    main(ARGV.dup)
+  rescue BootstrapError => error
+    warn("[cpp-ident-renamer] Error: #{error.message}")
+    exit 1
+  rescue Interrupt
+    warn("\n[cpp-ident-renamer] Interrupted; the unfinished download remains as .part and will resume next time")
+    exit 130
+  end
 end
