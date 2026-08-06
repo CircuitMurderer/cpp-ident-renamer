@@ -22,6 +22,22 @@ pub const Diagnostic = struct {
     type_spelling: ?[]const u8,
 };
 
+pub const ClangProblemSeverity = enum {
+    warning,
+    @"error",
+    fatal,
+};
+
+pub const ClangProblem = struct {
+    group: []const u8,
+    severity: ClangProblemSeverity,
+    message: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+    occurrences: usize = 1,
+};
+
 pub const ScanResult = struct {
     diagnostics: std.ArrayList(Diagnostic) = .empty,
     translation_units: usize = 0,
@@ -29,6 +45,7 @@ pub const ScanResult = struct {
     clang_warnings: usize = 0,
     clang_errors: usize = 0,
     names: usize = 0,
+    clang_problems: std.ArrayList(ClangProblem) = .empty,
 
     pub fn deinit(self: *ScanResult, allocator: std.mem.Allocator) void {
         for (self.diagnostics.items) |diagnostic| {
@@ -39,6 +56,13 @@ pub const ScanResult = struct {
             if (diagnostic.type_spelling) |value| allocator.free(value);
         }
         self.diagnostics.deinit(allocator);
+
+        for (self.clang_problems.items) |problem| {
+            allocator.free(problem.group);
+            allocator.free(problem.message);
+            allocator.free(problem.file);
+        }
+        self.clang_problems.deinit(allocator);
     }
 
     pub fn violationCount(self: *const ScanResult) usize {
@@ -133,6 +157,13 @@ pub fn scan(
         seen.deinit();
     }
 
+    var clang_problem_indices = std.StringHashMap(usize).init(allocator);
+    defer {
+        var keys = clang_problem_indices.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        clang_problem_indices.deinit();
+    }
+
     const index = c.clang_createIndex(0, 0) orelse return error.CannotCreateClangIndex;
     defer c.clang_disposeIndex(index);
 
@@ -167,6 +198,23 @@ pub fn scan(
         if (parse_result != c.CXError_Success or tu == null) {
             result.parse_failures += 1;
             result.clang_errors += 1;
+            const message = try std.fmt.allocPrint(
+                allocator,
+                "libclang failed to create the translation unit (error {d})",
+                .{parse_result},
+            );
+            defer allocator.free(message);
+            try appendClangProblem(
+                allocator,
+                &result,
+                &clang_problem_indices,
+                "libclang-parse",
+                .@"error",
+                message,
+                entry.file,
+                0,
+                0,
+            );
             if (progress) |observer| try notifyProgress(
                 observer,
                 io,
@@ -180,7 +228,13 @@ pub fn scan(
         }
         defer c.clang_disposeTranslationUnit(tu);
         result.translation_units += 1;
-        const clang_diagnostics = countClangDiagnostics(tu);
+        const clang_diagnostics = try collectClangDiagnostics(
+            allocator,
+            tu,
+            entry.file,
+            &result,
+            &clang_problem_indices,
+        );
         result.clang_warnings += clang_diagnostics.warnings;
         result.clang_errors += clang_diagnostics.errors;
         if (clang_diagnostics.errors > 0) result.parse_failures += 1;
@@ -716,24 +770,146 @@ const ClangDiagnosticCounts = struct {
     errors: usize = 0,
 };
 
-fn countClangDiagnostics(tu: c.CXTranslationUnit) ClangDiagnosticCounts {
+fn collectClangDiagnostics(
+    allocator: std.mem.Allocator,
+    tu: c.CXTranslationUnit,
+    fallback_file: []const u8,
+    result: *ScanResult,
+    problem_indices: *std.StringHashMap(usize),
+) !ClangDiagnosticCounts {
     const count = c.clang_getNumDiagnostics(tu);
-    var result = ClangDiagnosticCounts{};
+    var counts = ClangDiagnosticCounts{};
     var i: c_uint = 0;
     while (i < count) : (i += 1) {
         const diagnostic = c.clang_getDiagnostic(tu, i) orelse continue;
         defer c.clang_disposeDiagnostic(diagnostic);
-        switch (c.clang_getDiagnosticSeverity(diagnostic)) {
-            c.CXDiagnostic_Warning => result.warnings += 1,
-            c.CXDiagnostic_Error, c.CXDiagnostic_Fatal => result.errors += 1,
-            else => {},
-        }
+
+        const severity: ClangProblemSeverity = switch (c.clang_getDiagnosticSeverity(diagnostic)) {
+            c.CXDiagnostic_Warning => warning: {
+                counts.warnings += 1;
+                break :warning .warning;
+            },
+            c.CXDiagnostic_Error => problem: {
+                counts.errors += 1;
+                break :problem .@"error";
+            },
+            c.CXDiagnostic_Fatal => problem: {
+                counts.errors += 1;
+                break :problem .fatal;
+            },
+            else => continue,
+        };
+
+        var disable_option: c.CXString = undefined;
+        const option = try cursorString(allocator, c.clang_getDiagnosticOption(diagnostic, &disable_option));
+        defer allocator.free(option);
+        c.clang_disposeString(disable_option);
+        const group = if (option.len > 0) option else "unclassified";
+
+        const message = try cursorString(allocator, c.clang_getDiagnosticSpelling(diagnostic));
+        defer allocator.free(message);
+
+        var file: c.CXFile = null;
+        var line: c_uint = 0;
+        var column: c_uint = 0;
+        var offset: c_uint = 0;
+        c.clang_getSpellingLocation(c.clang_getDiagnosticLocation(diagnostic), &file, &line, &column, &offset);
+        const file_name = if (file) |value|
+            try cursorString(allocator, c.clang_getFileName(value))
+        else
+            try allocator.dupe(u8, fallback_file);
+        defer allocator.free(file_name);
+
+        try appendClangProblem(
+            allocator,
+            result,
+            problem_indices,
+            group,
+            severity,
+            message,
+            file_name,
+            line,
+            column,
+        );
     }
-    return result;
+    return counts;
+}
+
+fn appendClangProblem(
+    allocator: std.mem.Allocator,
+    result: *ScanResult,
+    problem_indices: *std.StringHashMap(usize),
+    group: []const u8,
+    severity: ClangProblemSeverity,
+    message: []const u8,
+    file: []const u8,
+    line: u32,
+    column: u32,
+) !void {
+    const key = try std.fmt.allocPrint(
+        allocator,
+        "{s}\x00{s}\x00{s}\x00{s}\x00{d}\x00{d}",
+        .{ group, @tagName(severity), message, file, line, column },
+    );
+    errdefer allocator.free(key);
+
+    if (problem_indices.get(key)) |index| {
+        allocator.free(key);
+        result.clang_problems.items[index].occurrences += 1;
+        return;
+    }
+
+    const owned_group = try allocator.dupe(u8, group);
+    errdefer allocator.free(owned_group);
+    const owned_message = try allocator.dupe(u8, message);
+    errdefer allocator.free(owned_message);
+    const owned_file = try allocator.dupe(u8, file);
+    errdefer allocator.free(owned_file);
+
+    const problem = ClangProblem{
+        .group = owned_group,
+        .severity = severity,
+        .message = owned_message,
+        .file = owned_file,
+        .line = line,
+        .column = column,
+    };
+
+    const index = result.clang_problems.items.len;
+    try result.clang_problems.append(allocator, problem);
+    errdefer _ = result.clang_problems.pop();
+    try problem_indices.put(key, index);
 }
 
 test "detects explicit Clang resource directory arguments" {
     try std.testing.expect(hasResourceDirArgument(&.{ "clang++", "-resource-dir", "/opt/llvm/lib/clang/18" }, 1));
     try std.testing.expect(hasResourceDirArgument(&.{ "clang++", "--resource-dir=/opt/llvm/lib/clang/18" }, 1));
     try std.testing.expect(!hasResourceDirArgument(&.{ "clang++", "-std=c++17" }, 1));
+}
+
+test "deduplicates repeated Clang problems" {
+    const allocator = std.testing.allocator;
+    var result = ScanResult{};
+    defer result.deinit(allocator);
+    var indices = std.StringHashMap(usize).init(allocator);
+    defer {
+        var keys = indices.keyIterator();
+        while (keys.next()) |key| allocator.free(key.*);
+        indices.deinit();
+    }
+
+    for (0..2) |_| try appendClangProblem(
+        allocator,
+        &result,
+        &indices,
+        "-Wsign-conversion",
+        .warning,
+        "implicit conversion changes signedness",
+        "/project/example.cpp",
+        12,
+        9,
+    );
+
+    try std.testing.expectEqual(@as(usize, 1), result.clang_problems.items.len);
+    try std.testing.expectEqual(@as(usize, 2), result.clang_problems.items[0].occurrences);
 }

@@ -31,6 +31,16 @@ awk -F '\t' '
 grep -q '^Warnings: 1$' scan-progress.txt
 grep -q '^Errors: 0$' scan-progress.txt
 grep -q '^Names: [1-9][0-9]*$' scan-progress.txt
-if grep -q 'Clang diagnostic counter fixture' scan-progress.txt; then
+if grep -q -- '-Wsign-conversion' scan-progress.txt; then
   exit 1
 fi
+ruby -rjson -e '
+  report = JSON.parse(File.read("clang_problems.json"))
+  group = report.fetch("groups").find { |item| item.fetch("option") == "-Wsign-conversion" }
+  abort "missing -Wsign-conversion group" unless group
+  abort "unexpected warning count" unless group.fetch("warning_count") == 1
+  abort "unexpected error count" unless group.fetch("error_count") == 0
+  problem = group.fetch("problems").first
+  abort "missing warning problem" unless problem.fetch("severity") == "warning"
+  abort "missing occurrence count" unless problem.fetch("occurrences") == 1
+'

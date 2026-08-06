@@ -143,6 +143,32 @@ Names: 47
 
 `Warnings` 和 `Errors` 是 Clang 诊断数量，`Names` 是当前已经发现的命名问题数量。Clang error 仍会计入解析失败并阻止不安全的 `--fix`，这里只隐藏冗长的逐条诊断文本，不改变安全判断。
 
+扫描结束后还会原子写入 `<root>/clang_problems.json`。warning 和 error 会优先按 libclang 返回的诊断选项分组，例如 `-Wsign-conversion`；没有 `-W...` 选项的诊断归入 `unclassified`，无法创建 translation unit 的错误归入 `libclang-parse`。同一位置、消息和选项的重复诊断只保存一项，并通过 `occurrences` 记录出现次数，因此重复包含公共头文件不会让报告无界膨胀。JSON 顶层 `summary` 保留原始 warning/error 出现总数，`groups` 提供各组选项、计数和详细问题列表。
+
+```json
+{
+  "summary": { "warnings": 3, "errors": 1, "unique_problems": 2, "groups": 2 },
+  "groups": [
+    {
+      "option": "-Wsign-conversion",
+      "warning_count": 3,
+      "error_count": 0,
+      "unique_problems": 1,
+      "problems": [
+        {
+          "severity": "warning",
+          "message": "implicit conversion changes signedness",
+          "file": "/workdir/src/example.cpp",
+          "line": 12,
+          "column": 9,
+          "occurrences": 3
+        }
+      ]
+    }
+  ]
+}
+```
+
 `-p` 既可指向目录，也可直接指向 `compile_commands.json`。默认只报告当前目录下的项目文件；可用 `--root` 指定其他项目根目录。
 
 不带 `--fix` 时，工具每次都会在扫描开始时截断 `<root>/idents.tsv`，随后按 translation unit 逐批追加结果。它是标准的 Tab 分隔文本文件，可以直接用支持 TSV 的编辑器或表格工具实时查看。文件每行是一项可修复问题，格式为：

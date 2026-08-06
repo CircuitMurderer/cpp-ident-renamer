@@ -4,6 +4,7 @@ const compilation_db = @import("compilation_db.zig");
 const scanner = @import("scanner.zig");
 const fixer = @import("fixer.zig");
 const idents = @import("idents.zig");
+const clang_problems = @import("clang_problems.zig");
 
 const OutputFormat = enum { text, json };
 
@@ -155,6 +156,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, out: *std.Io.Writer, options: O
         .errors = result.clang_errors,
         .names = result.violationCount(),
     });
+    try clang_problems.write(io, allocator, options.project_root, &result);
 
     var selection = if (options.fix)
         try idents.load(io, allocator, options.project_root)
@@ -427,4 +429,5 @@ test {
     _ = @import("naming.zig");
     _ = @import("compilation_db.zig");
     _ = @import("idents.zig");
+    _ = @import("clang_problems.zig");
 }

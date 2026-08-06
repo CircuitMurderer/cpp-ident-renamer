@@ -6,3 +6,4 @@ dist/
 
 .DS_Store
 idents.tsv
+clang_problems.json

@@ -1,7 +1,5 @@
 #include "sample.hpp"
 
-#warning "Clang diagnostic counter fixture"
-
 namespace project {
 
 int TIME_ESCAPE = 30;
@@ -18,6 +16,10 @@ bool Processor::IsReady() {
 
 int ComputeValue() {
     return 42;
+}
+
+int SignedConversion(unsigned int value) {
+    return value;
 }
 
 String defaultKeyword;
