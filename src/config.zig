@@ -23,8 +23,10 @@ pub const Config = struct {
     static_member_prefix: []const u8 = "s_",
     global_prefix: []const u8 = "g_",
     static_global_prefix: []const u8 = "s_",
+
     member_function_case: FunctionCase = .lower_camel,
     free_function_case: FunctionCase = .lower_camel,
+
     scan_local: bool = true,
     scan_static_local: bool = true,
     scan_member: bool = true,
@@ -32,20 +34,24 @@ pub const Config = struct {
     scan_global: bool = true,
     scan_static_global: bool = true,
     scan_functions: bool = true,
+
     use_canonical_type: bool = true,
     pointer_marker: []const u8 = "p",
+
     local_alternatives: std.ArrayList(VariableStyle) = .empty,
     static_local_alternatives: std.ArrayList(VariableStyle) = .empty,
     member_alternatives: std.ArrayList(VariableStyle) = .empty,
     static_member_alternatives: std.ArrayList(VariableStyle) = .empty,
     global_alternatives: std.ArrayList(VariableStyle) = .empty,
     static_global_alternatives: std.ArrayList(VariableStyle) = .empty,
+
     const_local_alternatives: std.ArrayList(VariableStyle) = .empty,
     const_static_local_alternatives: std.ArrayList(VariableStyle) = .empty,
     const_member_alternatives: std.ArrayList(VariableStyle) = .empty,
     const_static_member_alternatives: std.ArrayList(VariableStyle) = .empty,
     const_global_alternatives: std.ArrayList(VariableStyle) = .empty,
     const_static_global_alternatives: std.ArrayList(VariableStyle) = .empty,
+
     mappings: std.ArrayList(TypeMapping) = .empty,
     pointer_mappings: std.ArrayList(TypeMapping) = .empty,
 
@@ -56,12 +62,14 @@ pub const Config = struct {
         self.static_member_alternatives.deinit(allocator);
         self.global_alternatives.deinit(allocator);
         self.static_global_alternatives.deinit(allocator);
+
         self.const_local_alternatives.deinit(allocator);
         self.const_static_local_alternatives.deinit(allocator);
         self.const_member_alternatives.deinit(allocator);
         self.const_static_member_alternatives.deinit(allocator);
         self.const_global_alternatives.deinit(allocator);
         self.const_static_global_alternatives.deinit(allocator);
+
         self.mappings.deinit(allocator);
         self.pointer_mappings.deinit(allocator);
     }
@@ -140,7 +148,7 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
     var config = try Config.initDefaults(allocator);
     errdefer config.deinit(allocator);
 
-    const config_path = path orelse "cpp-ident-renamer.toml";
+    const config_path = path orelse "ident-mod.toml";
 
     const contents = std.Io.Dir.cwd().readFileAlloc(io, config_path, allocator, .limited(1024 * 1024)) catch |err| switch (err) {
         error.FileNotFound => if (path == null) return config else return err,

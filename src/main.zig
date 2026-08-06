@@ -106,7 +106,7 @@ pub fn main(init: std.process.Init) !void {
             try out.flush();
             return;
         }
-        std.log.err("invalid command line; run 'cpp-ident-renamer --help' for usage", .{});
+        std.log.err("invalid command line; run 'ident-mod --help' for usage", .{});
         return err;
     };
 
@@ -149,6 +149,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, out: *std.Io.Writer, options: O
 
     var result = try scanner.scan(io, allocator, &database, &config, options.project_root, progress);
     defer result.deinit(allocator);
+
     try progress_display.finish(io, .{
         .completed = database.entries.len,
         .total = database.entries.len,
@@ -156,6 +157,7 @@ fn run(io: std.Io, allocator: std.mem.Allocator, out: *std.Io.Writer, options: O
         .errors = result.clang_errors,
         .names = result.violationCount(),
     });
+
     try clang_problems.write(io, allocator, options.project_root, &result);
 
     var selection = if (options.fix)
@@ -207,9 +209,11 @@ fn performFix(
 
     var selected: std.ArrayList(scanner.Diagnostic) = .empty;
     defer selected.deinit(allocator);
+
     for (baseline.diagnostics.items) |diagnostic| if (approved.contains(diagnostic)) {
         try selected.append(allocator, diagnostic);
     };
+
     if (selected.items.len == 0) return .{ .status = .no_selected };
 
     var plan = try scanner.collectReplacements(
@@ -254,6 +258,7 @@ fn performFix(
     defer verification.deinit(allocator);
 
     const selected_remaining = approved.countSelected(verification.diagnostics.items);
+
     if (verification.parse_failures > 0 or selected_remaining > 0) {
         transaction.rollback(io, allocator) catch |rollback_err| {
             std.log.err("post-fix verification failed and rollback also failed: {t}", .{rollback_err});
@@ -291,6 +296,7 @@ fn parseArgs(args: []const []const u8) !Options {
 
     while (i < args.len) : (i += 1) {
         const arg = args[i];
+
         if (std.mem.eql(u8, arg, "-h") or std.mem.eql(u8, arg, "--help")) return error.HelpRequested;
         if (std.mem.eql(u8, arg, "--no-unmapped")) {
             options.show_unmapped = false;
@@ -331,17 +337,17 @@ fn writeText(out: *std.Io.Writer, result: *const scanner.ScanResult, show_unmapp
     for (result.diagnostics.items) |diagnostic| {
         switch (diagnostic.kind) {
             .variable => try out.print(
-                "{s}:{d}:{d}: warning: variable '{s}' should be named '{s}' (type: {s}) [cpp-ident-renamer-variable]\n",
+                "{s}:{d}:{d}: warning: variable '{s}' should be named '{s}' (type: {s}) [ident-mod-variable]\n",
                 .{ diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.old_name, diagnostic.suggested_name.?, diagnostic.type_spelling.? },
             ),
             .function => try out.print(
-                "{s}:{d}:{d}: warning: function '{s}' should be named '{s}' [cpp-ident-renamer-function]\n",
+                "{s}:{d}:{d}: warning: function '{s}' should be named '{s}' [ident-mod-function]\n",
                 .{ diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.old_name, diagnostic.suggested_name.? },
             ),
             .unmapped_type => {
                 unmapped_count += 1;
                 if (show_unmapped) try out.print(
-                    "{s}:{d}:{d}: note: no type prefix configured for '{s}' (variable: '{s}') [cpp-ident-renamer-unmapped-type]\n",
+                    "{s}:{d}:{d}: note: no type prefix configured for '{s}' (variable: '{s}') [ident-mod-unmapped-type]\n",
                     .{ diagnostic.file, diagnostic.line, diagnostic.column, diagnostic.type_spelling.?, diagnostic.old_name },
                 );
             },
@@ -406,15 +412,15 @@ fn writeJson(out: *std.Io.Writer, result: *const scanner.ScanResult, fix_outcome
 }
 
 const usage =
-    \\cpp-ident-renamer - semantic C++ identifier naming checker and refactoring tool
+    \\ident-mod - semantic C++ identifier naming checker and refactoring tool
     \\
     \\Usage:
-    \\  cpp-ident-renamer check [options]
-    \\  cpp-ident-renamer [options]
+    \\  ident-mod check [options]
+    \\  ident-mod [options]
     \\
     \\Options:
     \\  -p, --database <path>  compile_commands.json or its directory (default: build)
-    \\  -c, --config <path>    TOML configuration (default: cpp-ident-renamer.toml if present)
+    \\  -c, --config <path>    TOML configuration (default: ident-mod.toml if present)
     \\      --root <path>      only report declarations beneath this directory (default: .)
     \\      --format <format>  text or json (default: text)
     \\      --no-unmapped      hide notes for types without a configured prefix

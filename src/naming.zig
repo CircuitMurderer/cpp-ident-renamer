@@ -27,7 +27,9 @@ pub fn variableName(
         .global => config.global_alternatives.items,
         .static_global => config.static_global_alternatives.items,
     };
+
     if (matchesAlternative(alternatives, old_name)) return try allocator.dupe(u8, old_name);
+
     if (is_top_level_const) {
         const const_alternatives = switch (scope) {
             .local => config.const_local_alternatives.items,
@@ -37,6 +39,7 @@ pub fn variableName(
             .global => config.const_global_alternatives.items,
             .static_global => config.const_static_global_alternatives.items,
         };
+
         if (matchesAlternative(const_alternatives, old_name)) return try allocator.dupe(u8, old_name);
     }
 
@@ -138,6 +141,7 @@ fn stripKnownPrefix(
         if (!std.mem.startsWith(u8, result[expected_end..], config.pointer_marker)) break;
         expected_end += config.pointer_marker.len;
     }
+
     if (expected_end == config.pointer_marker.len * pointer_depth and
         hasConventionPrefix(result[expected_end..], type_prefix))
         return result[expected_end + type_prefix.len ..];
@@ -148,6 +152,7 @@ fn stripKnownPrefix(
     {
         after_pointers += config.pointer_marker.len;
     }
+
     if (after_pointers > 0) {
         if (stripMappedPrefix(config.pointer_mappings.items, result[after_pointers..])) |base| return base;
         if (stripMappedPrefix(config.mappings.items, result[after_pointers..])) |base| return base;

@@ -8,16 +8,16 @@ case "$tool" in
   *) tool="$fixture_root/$tool" ;;
 esac
 
-temp_root=$(mktemp -d "${TMPDIR:-/tmp}/cpp-ident-renamer-scan.XXXXXX")
+temp_root=$(mktemp -d "${TMPDIR:-/tmp}/ident-mod-scan.XXXXXX")
 trap 'rm -rf "$temp_root"' EXIT HUP INT TERM
 mkdir -p "$temp_root/test"
 cp -R "$fixture_root/test/fixture" "$temp_root/test/fixture"
 cd "$temp_root"
+cp test/fixture/ident-mod.toml ident-mod.toml
 
 set +e
 "$tool" check \
   -p test/fixture/compile_commands.json \
-  -c test/fixture/cpp-ident-renamer.toml \
   --root . >/dev/null 2>scan-progress.txt
 status=$?
 set -e
@@ -69,11 +69,11 @@ ruby -rjson -e '
 '
 
 sed 's/^local = true$/local = false/' \
-  test/fixture/cpp-ident-renamer.toml >cpp-ident-renamer-no-locals.toml
+  test/fixture/ident-mod.toml >ident-mod-no-locals.toml
 set +e
 "$tool" check \
   -p test/fixture/compile_commands.json \
-  -c cpp-ident-renamer-no-locals.toml \
+  -c ident-mod-no-locals.toml \
   --root . >/dev/null 2>no-local-progress.txt
 status=$?
 set -e

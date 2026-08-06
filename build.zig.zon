@@ -1,7 +1,7 @@
 .{
-    .name = .cpp_ident_renamer,
+    .name = .ident_mod,
     .version = "0.1.0",
-    .fingerprint = 0x4c3bc002a5f13d22,
+    .fingerprint = 0xde9153d9bc8ee210,
     .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
@@ -9,7 +9,7 @@
         "src",
         "test",
         "README.md",
-        "cpp-ident-renamer.toml.example",
+        "ident-mod.toml.example",
         "zls.build.json",
     },
 }

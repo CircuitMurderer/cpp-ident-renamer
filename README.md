@@ -1,271 +1,168 @@
-# cpp-ident-renamer
+# ident-mod
 
-`cpp-ident-renamer` 是一个用 Zig 和 libclang 实现的 C++ 语义命名检查与重构工具。默认扫描、报告并把可修复项写入项目根目录的 `idents.tsv`；只有显式传入 `--fix` 或 `-f` 才会修改源码。普通扫描会在启动时清空该文件，并在每个 translation unit 完成后立即追加新结果，不需要等待整个项目扫描结束。
+基于 Zig 和 libclang 的 C++ 标识符检查与安全重构工具。
 
-它会读取 `compile_commands.json`，遍历真实的 Clang AST，并检查：
+## 安装
 
-- 非静态成员变量：`numberOfSlice` → `m_nNumberOfSlice`
-- 局部变量：`char* funcName` → `char* psFuncName`
-- 静态局部、静态成员和静态全局变量：使用各自的静态前缀，例如 `char* funcName` → `char* s_psFuncName`
-- 静态成员变量：按 `static_member` 前缀检查，默认使用 `s_`
-- 全局及命名空间变量：`defaultKeyword` → `g_sDefaultKeyword`
-- 指针层级位于作用域和类型前缀之间：`char* name` → `char* m_psName`，`char** names` → `char** g_ppsNames`
-- 成员函数和自由函数：分别支持小驼峰、大驼峰、snake_case 或保持不变
-- 无类型映射的变量：输出 note，提醒补全项目配置
-
-函数参数、构造/析构函数、运算符、系统头文件和项目根目录以外的声明不会被检查。重复包含的头文件诊断会按文件位置去重。
-
-## 依赖
-
-- Zig 0.16.0
-- Ruby 2.6 或更新版本（只使用标准库）
-- 支持 `.tar.xz` 的 `tar`（常见 Linux/macOS 默认提供）
-- CMake 项目通常用 `-DCMAKE_EXPORT_COMPILE_COMMANDS=on` 生成 compilation database
-
-不要求系统预装 Clang/libclang。项目根目录的 Ruby 构建脚本会下载 LLVM release 预编译包到 `.tools/llvm/`，校验 SHA-256，解压后让 Zig 从这个私有目录查找头文件和 `libclang`：
+联网构建要求 Ruby 2.6+、Zig 0.16.0 和 `tar`。LLVM 18.1.8 会安装到项目自己的 `.tools/`，不修改系统目录。
 
 ```sh
-ruby build.rb install
-ruby build.rb build
-```
+git clone git@github.com:CircuitMurderer/ident-mod.git
+cd ident-mod
 
-默认固定 LLVM 18.1.8，支持 Linux x86_64、Linux ARM64 和 macOS Apple Silicon。Linux x86_64 使用 Ubuntu 18.04 构建，最低要求 glibc 2.27，可运行于 glibc 2.28 的 Kylin Linux Advanced Server V10。压缩包约为 0.8–1.0 GiB，下载缓存和解压目录会同时保留，建议预留约 10 GiB 空间。缓存位于 `.tools/downloads/`，下载中断后再次执行会从 `.part` 文件续传。仓库不会修改系统目录，也不需要 `sudo`。运行以下命令可以检查当前环境，且不会触发下载：
-
-```sh
 ruby build.rb doctor
+ruby build.rb build
+./zig-out/bin/ident-mod --help
 ```
 
-Linux 上 `doctor` 会显示检测到的内核、glibc 版本及各自最低要求。安装 LLVM 时还会实际运行私有目录中的 `clang --version`；安装离线 Zig 时会实际运行 `zig version`，任一工具存在架构或运行库不兼容都会在编译前终止。构建脚本还会自动查找私有 LLVM 的 `lib/clang/<版本>/include/stddef.h`，把对应 resource directory 固化进工具；扫描时不依赖系统安装 Clang，也不会误去 `/usr/include` 寻找 Clang builtin headers。
-
-Zig 0.16.0 保持不变。Zig 自带用于编译和 `@cImport` 的 Clang/LLVM 21，不需要在目标机另外安装 Clang 21；外部 LLVM 18.1.8 只提供运行时扫描 C++ AST 的稳定 libclang C API，两者不要求主版本一致。编辑器可以继续使用单独安装的 clangd 22，它也不参与本工具的链接和运行。
-
-Zig 当前官方 Linux 支持基线是内核 5.10，但这不是类似 glibc 符号版本的加载硬门槛。已确认 Zig 0.16.0 可以在目标 Kylin 4.19 内核上启动，因此构建脚本只在 `doctor` 中提示“超出官方支持范围”，不会阻止安装或编译。4.19 环境仍应至少完整执行一次 `ruby build.rb test`：它不仅运行 `zig version`，还会编译、链接并实际运行本工具的单元、端到端和修复安全测试。全部通过即可继续保留 Zig 0.16.0；若实际测试暴露内核相关错误，再考虑降级 Zig。
-
-如果机器已经有可用的 LLVM，也可以跳过下载。这个选项同样适合开发时临时覆盖：
+已有 LLVM：
 
 ```sh
-ruby build.rb build --llvm-prefix /opt/homebrew/opt/llvm@21
-# 或：CPP_IDENT_RENAMER_LLVM_PREFIX=/opt/llvm ruby build.rb build
+ruby build.rb build --llvm-prefix /opt/llvm
+IDENT_MOD_LLVM_PREFIX=/opt/llvm ruby build.rb build
 ```
 
-VS Code/ZLS 分析 `@cImport` 时也需要同一个构建选项。仓库根目录的 `zls.build.json` 已指向 `.tools/llvm/current`；执行一次 `ruby build.rb install` 后运行 `Zig: Restart ZLS` 即可恢复 `@cImport("clang-c/Index.h")` 的补全。
-
-Ruby 脚本实际执行的命令会逐条打印，便于调试。更多选项（离线缓存、自定义 LLVM 下载地址和强制重装）可运行 `ruby build.rb help` 查看。仍可绕过包装器直接运行 Zig：
+Linux 纯内网部署：
 
 ```sh
-zig build \
-  -Dllvm-prefix="$PWD/.tools/llvm/current" \
-  -Dclang-resource-dir="$PWD/.tools/llvm/current/lib/clang/18"
-```
-
-清理下载缓存、未完成的下载、Zig 构建缓存、`zig-out/` 和 `dist/`：
-
-```sh
-ruby build.rb clean
-```
-
-默认保留已经安装在 `.tools/llvm/` 和 `.tools/zig/` 中的本地工具链，避免下次重新解压。需要完全重置时使用：
-
-```sh
-ruby build.rb clean --all
-```
-
-`--all` 还会删除本地安装的 LLVM、Zig 和离线清单；之后必须重新下载安装，或者从原始离线包重新解包。
-
-## Linux 纯内网部署
-
-在可访问互联网的机器上执行：
-
-```sh
-# Linux x86_64；省略目标时也默认使用它
+# 联网机器：选择目标平台，包内同时包含 Zig 和 LLVM
 ruby build.rb --pack-offline linux-x64
-
-# Linux ARM64/AArch64
 ruby build.rb --pack-offline linux-arm64
-```
 
-也可以写成 `ruby build.rb --pack-offline --offline-target linux-arm64`。命令会为指定架构下载并校验 LLVM 18.1.8 和 Zig 0.16.0，然后在 `dist/` 生成对应文件：
-
-```text
-cpp-ident-renamer-offline-linux-x64.tar
-cpp-ident-renamer-offline-linux-x64.tar.sha256
-
-或：
-
-cpp-ident-renamer-offline-linux-arm64.tar
-cpp-ident-renamer-offline-linux-arm64.tar.sha256
-```
-
-离线包包含当前项目源码、配置、LLVM 压缩包和 Zig 压缩包。LLVM 和 Zig 本身已经使用 xz 压缩，因此外层使用普通 tar，避免耗费大量时间重复压缩。
-
-把 `.tar` 文件复制到内网机器并解包：
-
-```sh
-sha256sum -c cpp-ident-renamer-offline-linux-x64.tar.sha256
-tar -xf cpp-ident-renamer-offline-linux-x64.tar
-cd cpp-ident-renamer-offline-linux-x64
+# 把 dist/ident-mod-offline-linux-x64.tar{,.sha256} 复制到内网机器
+sha256sum -c ident-mod-offline-linux-x64.tar.sha256
+tar -xf ident-mod-offline-linux-x64.tar
+cd ident-mod-offline-linux-x64
 ruby build.rb build
 ```
 
-ARM64 包使用同样流程，只需把文件名中的 `linux-x64` 换成 `linux-arm64`。解包后的项目会自动进入离线模式：不再访问网络，先分别验证 LLVM/Zig 的 SHA-256，再安装到 `.tools/` 并使用包内 Zig 编译。内网机器不需要系统 Clang、libclang、Zig、新版 GCC 或 Clang 21；仍需 Ruby 2.6+、支持 xz 的 tar，以及对应的 Linux 架构。Linux x64 还要求 glibc 2.27 或更新版本。低于 Linux 5.10 属于 Zig 官方支持范围之外，但不会被脚本硬性拦截。首次解包和编译建议预留约 12 GiB 空间。
+Linux x86_64 最低要求 glibc 2.27；Kylin V10 的 glibc 2.28 可用。
 
 ## 使用
 
-复制并编辑示例配置：
+生成 compilation database：
 
 ```sh
-cp cpp-ident-renamer.toml.example cpp-ident-renamer.toml
-ruby build.rb run -- check -p build
+cd /path/to/workdir
+cmake -S . -B build -DCMAKE_EXPORT_COMPILE_COMMANDS=ON
 ```
 
-先扫描并检查 `idents.tsv`，删除暂时不希望修改的行，再自动修复并验证：
+扫描实际项目：
 
 ```sh
-ruby build.rb run -- check -p build
-# 审核项目根目录的 idents.tsv
-ruby build.rb run -- check -p build --fix
-# -f 是 --fix 的短选项
+cd /path/to/workdir
+
+/path/to/ident-mod/zig-out/bin/ident-mod check \
+  -p build \
+  -c /path/to/workdir/ident-mod.toml \
+  --root .
 ```
 
-大型项目扫描期间可以在另一个终端实时查看已经发现的标记：
-
-```sh
-tail -f idents.tsv
-```
-
-此时按 `Ctrl+C` 中止扫描，已经完整写入的行仍会保留。`--fix` 模式不会清空或追加该文件，仍然只修复文件中原有并且本轮扫描再次发现的标记。
-
-扫描期间不会逐条打印 Clang 的 warning/error 内容。交互式终端会在 stderr 中原地刷新以下三行；重定向输出或在 CI 中运行时只在扫描结束后打印一次，因此不会污染 stdout 的文本或 JSON 报告：
+输出文件位于 `--root`：
 
 ```text
-Warnings: 12
-Errors: 3
-Names: 47
+idents.tsv             可修复的命名标记
+clang_problems.json    按 -Wxxx 分组的 Clang warning/error
 ```
 
-`Warnings` 和 `Errors` 是 Clang 诊断数量，`Names` 是当前已经发现的命名问题数量。Clang error 仍会计入解析失败并阻止不安全的 `--fix`，这里只隐藏冗长的逐条诊断文本，不改变安全判断。
-
-扫描结束后还会原子写入 `<root>/clang_problems.json`。warning 和 error 会优先按 libclang 返回的诊断选项分组，例如 `-Wsign-conversion`；没有 `-W...` 选项的诊断归入 `unclassified`，无法创建 translation unit 的错误归入 `libclang-parse`。同一位置、消息和选项的重复诊断只保存一项，并通过 `occurrences` 记录出现次数，因此重复包含公共头文件不会让报告无界膨胀。JSON 顶层 `summary` 保留原始 warning/error 出现总数，`groups` 提供各组选项、计数和详细问题列表。
-
-```json
-{
-  "summary": { "warnings": 3, "errors": 1, "unique_problems": 2, "groups": 2 },
-  "groups": [
-    {
-      "option": "-Wsign-conversion",
-      "warning_count": 3,
-      "error_count": 0,
-      "unique_problems": 1,
-      "problems": [
-        {
-          "severity": "warning",
-          "message": "implicit conversion changes signedness",
-          "file": "/workdir/src/example.cpp",
-          "line": 12,
-          "column": 9,
-          "occurrences": 3
-        }
-      ]
-    }
-  ]
-}
-```
-
-`-p` 既可指向目录，也可直接指向 `compile_commands.json`。默认只报告当前目录下的项目文件；可用 `--root` 指定其他项目根目录。
-
-不带 `--fix` 时，工具每次都会在扫描开始时截断 `<root>/idents.tsv`，随后按 translation unit 逐批追加结果。它是标准的 Tab 分隔文本文件，可以直接用支持 TSV 的编辑器或表格工具实时查看。文件每行是一项可修复问题，格式为：
-
-```text
-<SHA-256 标记>    <variable|function>    <旧名称>    <建议名称>    <文件>:<行>:<列>
-```
-
-首字段是修复授权使用的稳定标记，后面的字段用于人工检查。可以直接删除整行来排除某项；空行、注释行和格式无效的行会被忽略。无类型映射的 note 不可自动修复，因此不会写入 `idents.tsv`。
-
-带 `--fix` 时仍会先运行完整扫描，但不会创建、覆盖或补写 `idents.tsv`，只会修复当前文件中仍与扫描结果匹配的标记。文件不存在、为空，或者里面没有仍有效的标记时，命令退化为普通扫描：不修改源码，也不写 `idents.tsv`；若仍有命名问题，退出码仍为 `1`。这样可以把“扫描 → 审核清单 → 精确修复”拆成两个明确步骤。
-
-文本输出适合人和编译器诊断面板：
-
-```text
-src/processor.cpp:8:9: warning: variable 'numberOfSlice' should be named 'm_nNumberOfSlice' (type: int) [cpp-ident-renamer-variable]
-```
-
-机器读取可使用 JSON：
+审核并修复：
 
 ```sh
-zig-out/bin/cpp-ident-renamer check -p build --format json
+# 扫描并生成 idents.tsv
+ident-mod check -p build --root .
+
+# 删除 idents.tsv 中暂时不想修改的行，然后只修复保留的标记
+ident-mod check -p build --root . --fix
+ident-mod check -p build --root . -f
 ```
 
-退出码为 `0` 表示命名通过或修复验证成功，`1` 表示存在命名问题，`2` 表示有编译单元无法解析，`3` 表示修复因安全检查被拒绝或验证失败后已经回滚，`4` 表示验证和回滚同时失败、需要人工检查。无映射类型本身不导致失败。
-
-`--fix` 使用声明的 USR 收集已授权标识符的声明、定义和语义引用，不进行全局字符串替换。写入前会验证每个字节位置仍与旧名称匹配；宏展开、项目根目录外引用、位置冲突和初始 Clang 错误都会让整次修复在写盘前终止。写入后会重新解析 compilation database 中的全部翻译单元，并确认没有解析错误且已授权的问题不再存在，否则恢复所有被修改文件。未写入 `idents.tsv` 的命名问题允许保留，供以后分批处理。
-
-验证范围是当前 `compile_commands.json` 覆盖的翻译单元。它不能证明仓库外部调用方的 ABI、未进入 compilation database 的源码或最终链接步骤仍然正确；公开 API 重命名后仍应运行项目自己的完整构建与测试。
-
-运行测试：
+`--fix` 仍会完整扫描。`idents.tsv` 不存在或为空时不会修改源码，也不会重写该文件。
 
 ```sh
-ruby build.rb test
+ident-mod --help
+ident-mod check -p build --format json
+ident-mod check -p build --no-unmapped
 ```
 
 ## 配置
 
+默认读取当前目录的 `ident-mod.toml`：
+
+```sh
+cp ident-mod.toml.example ident-mod.toml
+```
+
 ```toml
+# true：typedef/using 按底层类型匹配；false：可直接配置别名
 use_canonical_type = true
 
 [scan]
-local = false        # 关闭普通局部变量，static_local 不受影响
-static_local = true
-member = true
-static_member = true
-global = true
-static_global = true
-functions = true
+local = false         # 普通局部变量
+static_local = true   # 静态局部变量
+member = true         # 非静态成员变量
+static_member = true  # 静态成员变量
+global = true         # 全局/命名空间变量
+static_global = true  # static 全局变量
+functions = true      # 成员函数和自由函数
 
 [scope]
-local = ""           # psFuncName：无作用域前缀，只保留匈牙利规则
-static_local = "s_"  # s_psFuncName
+local = ""
+static_local = "s_"
 member = "m_"
 static_member = "s_"
 global = "g_"
 static_global = "s_"
 
+# 只有顶层 const 全局变量允许 UPPER_SNAKE
 [scope_alternatives.const]
-global = ["upper_snake"] # 只有 const 全局变量可使用 TIME_ESCAPE
+global = ["upper_snake"]
+
+# 若不区分 const，改用：
+# [scope_alternatives]
+# global = ["upper_snake"]
 
 [functions]
-member = "camel"    # camel / pascal / snake / unchanged
-free = "pascal"
+member = "camel"  # GetSize -> getSize
+free = "pascal"   # calculate_total -> CalculateTotal
 
 [pointers]
 marker = "p"
-char = "s"          # char* -> ps, char** -> pps
+char = "s"        # char* -> ps，char** -> pps
 
 [types]
+bool = "b"
+char = "ch"
 int = "n"
+double = "d"
 "std::string" = "s"
-"std::vector" = "vec"  # 同时匹配 std::vector<...>
+"std::vector" = "vec"
 "project::Request" = "req"
+"project::Response" = "rsp"
 ```
 
-`use_canonical_type = true` 会穿透 typedef/using；设为 `false` 时可以直接给别名配置前缀。配置中的类型条目会覆盖同名内置映射。
+命名组合：
 
-`[scan]` 控制哪些 AST 节点进入本工具的命名分析和 `idents.tsv` 输出，所有开关默认都是 `true`。关闭某一项不会阻止 Clang 解析或遍历 translation unit，但会跳过该作用域的类型读取、命名计算和结果记录。`local` 与 `static_local` 相互独立，因此可以关闭大量普通局部变量，同时继续检查 `s_` 开头的静态局部变量；`functions = false` 会同时关闭成员函数和自由函数扫描。
+```text
+作用域前缀 + 每级指针的 p + 类型前缀 + PascalCase 名称
 
-`[functions]` 中的 `camel` 明确表示小驼峰，例如 `GetSize` → `getSize`；大驼峰使用 `pascal`，例如 `calculate_total` → `CalculateTotal`。`member` 控制成员函数，`free` 控制普通自由函数和非成员函数模板。
-
-`[scope]` 的作用域前缀之后仍会组合指针前缀、类型前缀和 PascalCase 名称。局部变量的 `local = ""` 因而只应用匈牙利规则；三个静态作用域可以独立配置，默认都使用 `s_`。例如 `char* funcName` 分别得到局部变量 `psFuncName`、静态局部变量 `s_psFuncName`、静态成员变量 `s_psFuncName` 和静态全局变量 `s_psFuncName`。
-
-`[scope_alternatives]` 为指定作用域的所有变量增加可选合规风格；`[scope_alternatives.const]` 只对顶层 const 变量生效。两者都不替换 `[scope]` 定义的主规则。目前支持 `upper_snake`，并可分别配置 `local`、`static_local`、`member`、`static_member`、`global` 和 `static_global`。上述配置允许 `const int TIME_ESCAPE` 和普通的 `int g_nTimeEscape`，但普通 `int TIME_ESCAPE` 仍会建议改为 `g_nTimeEscape`。
-
-const 条件根据 Clang 类型语义判断，而不是搜索源码文本。`constexpr` 变量通常具有顶层 const，因此可以匹配；`const int* value` 是“指向 const 的可变指针”，不匹配；`int* const VALUE` 是“const 指针对象”，可以匹配。typedef/using 中携带的 const 也会通过 canonical type 被识别。若希望不区分 const、所有全局变量都接受大写下划线，继续使用无 `.const` 的配置：
-
-```toml
-[scope_alternatives]
-global = ["upper_snake"]
+char* funcName             -> psFuncName
+static char* funcName      -> s_psFuncName
+成员 char* funcName        -> m_psFuncName
+全局 char** names          -> g_ppsNames
 ```
 
-指针规则的组合顺序固定为 `scope + pointer + type + PascalName`。每增加一级指针就增加一个 `marker`；`[pointers]` 中的类型映射优先于 `[types]`，所以普通 `char` 仍可使用 `ch`，而 `char*` 使用字符串前缀 `s`。例如 `int*` 使用普通 `int = "n"` 映射得到 `m_pnCount`。
+const 判断使用 Clang 类型语义：
 
-## 当前边界
+```cpp
+const int TIME_ESCAPE = 30;       // 顶层 const，可用 UPPER_SNAKE
+int TIME_ESCAPE = 30;             // 不合规 -> g_nTimeEscape
+const int* POINTER_TO_CONST;      // 指针可变，不是顶层 const
+int* const CONST_POINTER = NULL;  // 指针本身 const
+```
 
-当前支持不修改源码的扫描审核流以及事务式 `--fix`。尚未提供独立的 diff 预览模式；宏展开中的引用会保守拒绝自动修改。
+```text
+函数风格：camel | pascal | snake | unchanged
+作用域键：local | static_local | member | static_member | global | static_global
+```
+
+所有 `[scan]` 开关默认都是 `true`。关闭某项后 Clang 仍解析 AST，但该类标识符不会进入命名分析或 `idents.tsv`。函数参数目前不扫描。

@@ -1,4 +1,4 @@
-# Project-specific configuration for cpp-ident-renamer.
+# Copy this file to ident-mod.toml and adapt the project-specific types.
 use_canonical_type = true
 
 [scan]

@@ -33,6 +33,7 @@ pub fn load(io: std.Io, parent_allocator: std.mem.Allocator, path_arg: []const u
         try std.fs.path.join(allocator, &.{ path_arg, "compile_commands.json" });
 
     const contents = try std.Io.Dir.cwd().readFileAlloc(io, path, allocator, .limited(64 * 1024 * 1024));
+
     const raw = try std.json.parseFromSliceLeaky([]const RawEntry, allocator, contents, .{
         .ignore_unknown_fields = true,
     });
@@ -45,10 +46,12 @@ pub fn load(io: std.Io, parent_allocator: std.mem.Allocator, path_arg: []const u
             item.directory
         else
             try std.fs.path.resolve(allocator, &.{ current_directory, item.directory });
+
         const file = if (std.fs.path.isAbsolute(item.file))
             item.file
         else
             try std.fs.path.resolve(allocator, &.{ directory, item.file });
+
         const arguments = if (item.arguments) |args|
             args
         else if (item.command) |command|

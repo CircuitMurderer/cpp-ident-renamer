@@ -49,6 +49,12 @@ class BuildScriptTest < Minitest::Test
     end
   end
 
+  def test_offline_bundle_uses_the_project_name
+    assert_equal "ident-mod-offline-linux-x64", offline_bundle_basename("linux-x86_64")
+    assert_includes OFFLINE_PROJECT_ENTRIES, "ident-mod.toml"
+    assert_includes OFFLINE_PROJECT_ENTRIES, "ident-mod.toml.example"
+  end
+
   def test_clean_preserves_installed_toolchains_by_default
     targets = clean_targets(remove_toolchains: false)
 
@@ -69,7 +75,7 @@ class BuildScriptTest < Minitest::Test
   end
 
   def test_finds_the_clang_resource_directory
-    Dir.mktmpdir("cpp-ident-renamer-resource-") do |prefix|
+    Dir.mktmpdir("ident-mod-resource-") do |prefix|
       expected = File.join(prefix, "lib", "clang", "18")
       FileUtils.mkdir_p(File.join(expected, "include"))
       FileUtils.touch(File.join(expected, "include", "stddef.h"))
@@ -79,7 +85,7 @@ class BuildScriptTest < Minitest::Test
   end
 
   def test_rejects_an_llvm_prefix_without_builtin_headers
-    Dir.mktmpdir("cpp-ident-renamer-resource-") do |prefix|
+    Dir.mktmpdir("ident-mod-resource-") do |prefix|
       error = assert_raises(BootstrapError) { clang_resource_dir(prefix) }
 
       assert_includes error.message, "include/stddef.h"

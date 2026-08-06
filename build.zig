@@ -32,7 +32,7 @@ pub fn build(b: *std.Build) void {
     }
 
     const exe = b.addExecutable(.{
-        .name = "cpp-ident-renamer",
+        .name = "ident-mod",
         .root_module = root_module,
     });
     b.installArtifact(exe);
@@ -40,7 +40,7 @@ pub fn build(b: *std.Build) void {
     const run_cmd = b.addRunArtifact(exe);
     run_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_cmd.addArgs(args);
-    const run_step = b.step("run", "Run cpp-ident-renamer");
+    const run_step = b.step("run", "Run ident-mod");
     run_step.dependOn(&run_cmd.step);
 
     const test_module = b.createModule(.{
@@ -65,7 +65,7 @@ pub fn build(b: *std.Build) void {
     e2e_run.addFileArg(b.path("test/test-scan.sh"));
     e2e_run.addArtifactArg(exe);
     e2e_run.addFileInput(b.path("test/fixture/compile_commands.json"));
-    e2e_run.addFileInput(b.path("test/fixture/cpp-ident-renamer.toml"));
+    e2e_run.addFileInput(b.path("test/fixture/ident-mod.toml"));
     e2e_run.addFileInput(b.path("test/fixture/sample.cpp"));
     e2e_run.addFileInput(b.path("test/fixture/sample.hpp"));
     const e2e_step = b.step("test-e2e", "Run the checker against the C++ fixture");
@@ -75,14 +75,14 @@ pub fn build(b: *std.Build) void {
     fix_test_run.addFileArg(b.path("test/test-fix.sh"));
     fix_test_run.addArtifactArg(exe);
     fix_test_run.addFileInput(b.path("test/fixture/compile_commands.json"));
-    fix_test_run.addFileInput(b.path("test/fixture/cpp-ident-renamer.toml"));
+    fix_test_run.addFileInput(b.path("test/fixture/ident-mod.toml"));
     fix_test_run.addFileInput(b.path("test/fixture/sample.cpp"));
     fix_test_run.addFileInput(b.path("test/fixture/sample.hpp"));
     fix_test_run.addFileInput(b.path("test/safety_fixture/collision.cpp"));
     fix_test_run.addFileInput(b.path("test/safety_fixture/macro.cpp"));
     fix_test_run.addFileInput(b.path("test/safety_fixture/collision_commands.json"));
     fix_test_run.addFileInput(b.path("test/safety_fixture/macro_commands.json"));
-    fix_test_run.addFileInput(b.path("test/safety_fixture/cpp-ident-renamer.toml"));
+    fix_test_run.addFileInput(b.path("test/safety_fixture/ident-mod.toml"));
     const fix_test_step = b.step("test-fix", "Test successful fixes, safety refusal, and rollback");
     fix_test_step.dependOn(&fix_test_run.step);
 }

@@ -180,6 +180,7 @@ pub fn scan(
 
         var arg_ptrs: std.ArrayList([*c]const u8) = .empty;
         defer arg_ptrs.deinit(allocator);
+
         for (owned_args.items) |arg| try arg_ptrs.append(allocator, arg.ptr);
 
         const source = try allocator.dupeZ(u8, entry.file);
@@ -198,12 +199,14 @@ pub fn scan(
         if (parse_result != c.CXError_Success or tu == null) {
             result.parse_failures += 1;
             result.clang_errors += 1;
+
             const message = try std.fmt.allocPrint(
                 allocator,
                 "libclang failed to create the translation unit (error {d})",
                 .{parse_result},
             );
             defer allocator.free(message);
+
             try appendClangProblem(
                 allocator,
                 &result,
@@ -215,6 +218,7 @@ pub fn scan(
                 0,
                 0,
             );
+
             if (progress) |observer| try notifyProgress(
                 observer,
                 io,
@@ -226,8 +230,10 @@ pub fn scan(
             );
             continue;
         }
+
         defer c.clang_disposeTranslationUnit(tu);
         result.translation_units += 1;
+
         const clang_diagnostics = try collectClangDiagnostics(
             allocator,
             tu,
@@ -251,6 +257,7 @@ pub fn scan(
         const root = c.clang_getTranslationUnitCursor(tu);
         _ = c.clang_visitChildren(root, visit, &context);
         if (context.callback_error) |err| return err;
+
         if (progress) |observer| try notifyProgress(
             observer,
             io,
@@ -331,6 +338,7 @@ pub fn collectReplacements(
     const occurrence_counts = try allocator.alloc(usize, diagnostics.len);
     defer allocator.free(occurrence_counts);
     @memset(occurrence_counts, 0);
+
     for (diagnostics, 0..) |diagnostic, i| {
         if (diagnostic.kind != .unmapped_type and diagnostic.suggested_name != null and diagnostic.usr.len == 0)
             blocked[i] = .invalid_location;
@@ -360,6 +368,7 @@ pub fn collectReplacements(
 
         var arg_ptrs: std.ArrayList([*c]const u8) = .empty;
         defer arg_ptrs.deinit(allocator);
+
         for (owned_args.items) |arg| try arg_ptrs.append(allocator, arg.ptr);
 
         const source = try allocator.dupeZ(u8, entry.file);
@@ -376,6 +385,7 @@ pub fn collectReplacements(
             &tu,
         );
         if (parse_result != c.CXError_Success or tu == null) return error.TranslationUnitParseFailed;
+
         defer c.clang_disposeTranslationUnit(tu);
 
         var context = FixContext{
@@ -390,6 +400,7 @@ pub fn collectReplacements(
             .blocked = blocked,
             .occurrence_counts = occurrence_counts,
         };
+
         _ = c.clang_visitChildren(c.clang_getTranslationUnitCursor(tu), visitForReplacements, &context);
         if (context.callback_error) |err| return err;
     }
@@ -398,6 +409,7 @@ pub fn collectReplacements(
         if (diagnostic.kind != .unmapped_type and diagnostic.suggested_name != null and occurrence_counts[i] == 0 and blocked[i] == null)
             blocked[i] = .invalid_location;
     }
+
     for (blocked, 0..) |reason, i| if (reason) |value| {
         if (diagnostics[i].kind == .unmapped_type or diagnostics[i].suggested_name == null) continue;
         try plan.blocked.append(allocator, .{
@@ -405,6 +417,7 @@ pub fn collectReplacements(
             .reason = value,
         });
     };
+
     std.mem.sort(Replacement, plan.replacements.items, {}, replacementLessThan);
     return plan;
 }
@@ -429,13 +442,16 @@ fn inspectReplacementCursor(context: *FixContext, cursor: c.CXCursor) !void {
     else
         c.clang_getCursorReferenced(cursor);
     if (c.clang_Cursor_isNull(symbol) != 0) return;
+
     const usr = try cursorString(context.allocator, c.clang_getCursorUSR(symbol));
     defer context.allocator.free(usr);
+
     const candidate_index = context.candidates.get(usr) orelse return;
     context.occurrence_counts[candidate_index] += 1;
     const diagnostic = context.diagnostics[candidate_index];
 
     const location_result = try getReplacementLocation(context, c.clang_getCursorLocation(cursor));
+
     switch (location_result) {
         .macro_expansion => {
             if (context.blocked[candidate_index] == null) context.blocked[candidate_index] = .macro_expansion;
@@ -451,9 +467,11 @@ fn inspectReplacementCursor(context: *FixContext, cursor: c.CXCursor) !void {
         },
         .usable => |location| {
             defer context.allocator.free(location.file);
+
             const key = try std.fmt.allocPrint(context.allocator, "{s}:{d}", .{ location.file, location.offset });
             if (context.positions.get(key)) |replacement_index| {
                 context.allocator.free(key);
+
                 const existing = context.plan.replacements.items[replacement_index];
                 if (!std.mem.eql(u8, existing.old_name, diagnostic.old_name) or
                     !std.mem.eql(u8, existing.new_name, diagnostic.suggested_name.?))
@@ -463,6 +481,7 @@ fn inspectReplacementCursor(context: *FixContext, cursor: c.CXCursor) !void {
                 }
                 return;
             }
+
             const replacement_index = context.plan.replacements.items.len;
             try context.positions.put(key, replacement_index);
             try context.plan.replacements.append(context.allocator, .{
@@ -589,11 +608,14 @@ fn inspectVariableIfEnabled(
 fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.VariableScope) !void {
     const location = getLocation(context, cursor) orelse return;
     defer context.allocator.free(location.file);
+
     const old_name = try cursorString(context.allocator, c.clang_getCursorSpelling(cursor));
     defer context.allocator.free(old_name);
     if (old_name.len == 0) return;
+
     const usr = try cursorString(context.allocator, c.clang_getCursorUSR(cursor));
     defer context.allocator.free(usr);
+
     const raw_type = c.clang_getCursorType(cursor);
     const is_top_level_const = c.clang_isConstQualifiedType(c.clang_getCanonicalType(raw_type)) != 0;
     const selected_type = if (context.config.use_canonical_type) c.clang_getCanonicalType(raw_type) else raw_type;
@@ -602,6 +624,7 @@ fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.Variable
     const pointer_info = peelPointers(selected_type);
     const base_type_spelling = try cursorString(context.allocator, c.clang_getTypeSpelling(pointer_info.base_type));
     defer context.allocator.free(base_type_spelling);
+
     const suggested = try naming.variableName(
         context.allocator,
         context.config,
@@ -611,6 +634,7 @@ fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.Variable
         pointer_info.depth,
         old_name,
     );
+
     if (suggested) |new_name| {
         if (std.mem.eql(u8, old_name, new_name)) {
             context.allocator.free(new_name);
@@ -639,13 +663,17 @@ fn peelPointers(selected_type: c.CXType) PointerInfo {
 
 fn inspectFunction(context: *Context, cursor: c.CXCursor, function_case: config_mod.FunctionCase) !void {
     if (function_case == .unchanged) return;
+
     const location = getLocation(context, cursor) orelse return;
     defer context.allocator.free(location.file);
+
     const old_name = try cursorString(context.allocator, c.clang_getCursorSpelling(cursor));
     defer context.allocator.free(old_name);
     if (old_name.len == 0 or std.mem.startsWith(u8, old_name, "operator")) return;
+
     const usr = try cursorString(context.allocator, c.clang_getCursorUSR(cursor));
     defer context.allocator.free(usr);
+
     const new_name = try naming.functionName(context.allocator, function_case, old_name);
     if (std.mem.eql(u8, old_name, new_name)) {
         context.allocator.free(new_name);
@@ -665,6 +693,7 @@ fn getLocation(context: *Context, cursor: c.CXCursor) ?Location {
     var offset: c_uint = 0;
     c.clang_getSpellingLocation(location, &file, &line, &column, &offset);
     if (file == null) return null;
+
     const raw_path = cursorString(context.allocator, c.clang_getFileName(file)) catch |err| {
         context.callback_error = err;
         return null;
@@ -678,6 +707,7 @@ fn getLocation(context: *Context, cursor: c.CXCursor) ?Location {
         context.callback_error = err;
         return null;
     };
+
     if (!isWithin(context.project_root, resolved_path)) {
         context.allocator.free(resolved_path);
         return null;
@@ -699,11 +729,13 @@ fn appendDiagnostic(
         try std.fmt.allocPrint(context.allocator, "{s}:{s}", .{ usr, @tagName(kind) })
     else
         try std.fmt.allocPrint(context.allocator, "{s}:{d}:{s}", .{ location.file, location.offset, @tagName(kind) });
+
     if (context.seen.contains(key)) {
         context.allocator.free(key);
         if (suggested_name_owned) |value| context.allocator.free(value);
         return;
     }
+
     try context.seen.put(key, {});
     try context.result.diagnostics.append(context.allocator, .{
         .file = try context.allocator.dupe(u8, location.file),
@@ -745,6 +777,7 @@ fn lessThan(_: void, a: Diagnostic, b: Diagnostic) bool {
 
 fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, output: *std.ArrayList([:0]u8)) !void {
     const compiler_index: usize = if (entry.arguments.len > 1 and isCompilerWrapper(entry.arguments[0])) 1 else 0;
+
     try output.append(allocator, try allocator.dupeZ(u8, entry.arguments[compiler_index]));
     try output.append(allocator, try std.fmt.allocPrintSentinel(allocator, "-working-directory={s}", .{entry.directory}, 0));
     if (build_options.clang_resource_dir.len > 0 and !hasResourceDirArgument(entry.arguments, compiler_index + 1)) {

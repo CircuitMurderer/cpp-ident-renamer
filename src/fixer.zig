@@ -37,7 +37,7 @@ pub const Transaction = struct {
             defer allocator.free(current);
 
             if (!std.mem.eql(u8, current, snapshot.updated)) {
-                std.log.err("cannot safely roll back {s}: file changed after cpp-ident-renamer wrote it", .{snapshot.path});
+                std.log.err("cannot safely roll back {s}: file changed after ident-mod wrote it", .{snapshot.path});
                 return error.SourceChangedDuringVerification;
             }
 

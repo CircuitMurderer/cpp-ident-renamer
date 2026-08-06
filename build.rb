@@ -45,8 +45,8 @@ OFFLINE_PROJECT_ENTRIES = %w[
   build.rb
   build.zig
   build.zig.zon
-  cpp-ident-renamer.toml
-  cpp-ident-renamer.toml.example
+  ident-mod.toml
+  ident-mod.toml.example
   src
   test
   zls.build.json
@@ -95,7 +95,7 @@ OFFLINE_ZIG_ASSETS = {
 class BootstrapError < StandardError; end
 
 def say(message)
-  $stdout.puts("[cpp-ident-renamer] #{message}")
+  $stdout.puts("[ident-mod] #{message}")
   $stdout.flush
 end
 
@@ -189,7 +189,7 @@ def offline_target_label(target)
 end
 
 def offline_bundle_basename(target)
-  "cpp-ident-renamer-offline-#{offline_target_label(target)}"
+  "ident-mod-offline-#{offline_target_label(target)}"
 end
 
 def release_url(version, asset_name)
@@ -209,7 +209,7 @@ def http_each_response(url, headers = {})
     http.read_timeout = 120
 
     request = Net::HTTP::Get.new(uri.request_uri)
-    request["User-Agent"] = "cpp-ident-renamer-bootstrap/#{DEFAULT_LLVM_VERSION}"
+    request["User-Agent"] = "ident-mod-bootstrap/#{DEFAULT_LLVM_VERSION}"
     request["Accept-Encoding"] = "identity"
     headers.each { |name, value| request[name] = value }
 
@@ -243,7 +243,7 @@ def read_offline_manifest
 
   manifest = JSON.parse(File.read(OFFLINE_MANIFEST_PATH))
   unless manifest["format"] == 1 &&
-      manifest["project"] == "cpp-ident-renamer" &&
+      manifest["project"] == "ident-mod" &&
       manifest["target"].is_a?(String)
     raise BootstrapError, "Invalid offline bundle manifest: #{OFFLINE_MANIFEST_PATH}"
   end
@@ -409,9 +409,9 @@ def download_asset(asset, options)
 
         if expected_size
           percent = downloaded * 100.0 / expected_size
-          $stdout.print("\r[cpp-ident-renamer] %.1f%% (%d / %d MiB)" % [percent, downloaded / 1_048_576, expected_size / 1_048_576])
+          $stdout.print("\r[ident-mod] %.1f%% (%d / %d MiB)" % [percent, downloaded / 1_048_576, expected_size / 1_048_576])
         else
-          $stdout.print("\r[cpp-ident-renamer] Downloaded %d MiB" % (downloaded / 1_048_576))
+          $stdout.print("\r[ident-mod] Downloaded %d MiB" % (downloaded / 1_048_576))
         end
         $stdout.flush
         last_report = now
@@ -776,7 +776,7 @@ def pack_offline(options)
 
     manifest = {
       "format" => 1,
-      "project" => "cpp-ident-renamer",
+      "project" => "ident-mod",
       "target" => target,
       "llvm" => bundle_asset_entry(llvm_asset, llvm_archive, DEFAULT_LLVM_VERSION, target),
       "zig" => bundle_asset_entry(zig_asset, zig_archive, DEFAULT_ZIG_VERSION, target)
@@ -788,7 +788,7 @@ def pack_offline(options)
     File.write(
       File.join(bundle_root, "OFFLINE-README.txt"),
       <<~TEXT
-        cpp-ident-renamer offline bundle
+        ident-mod offline bundle
         Target: #{offline_target_label(target)}
         Included: LLVM #{DEFAULT_LLVM_VERSION} and Zig #{DEFAULT_ZIG_VERSION}
 
@@ -952,7 +952,7 @@ def usage
       clean      Remove downloads and build outputs; keep installed toolchains
 
     Installation options:
-      --llvm-prefix PATH    Use an existing LLVM without downloading; also available as CPP_IDENT_RENAMER_LLVM_PREFIX
+      --llvm-prefix PATH    Use an existing LLVM without downloading; also available as IDENT_MOD_LLVM_PREFIX
       --offline             Use only a previously verified download cache
       --force               Preserve the old installation as .previous-* and reinstall
       --all                 With clean, also remove installed local LLVM and Zig
@@ -965,7 +965,7 @@ def usage
       --zig-sha256 HEX      SHA-256 of the custom Zig archive
 
     Other arguments are passed to Zig. For run, arguments before `--` are Zig build
-    arguments and arguments after `--` are passed to cpp-ident-renamer.
+    arguments and arguments after `--` are passed to ident-mod.
   TEXT
 end
 
@@ -981,12 +981,12 @@ def parse_arguments(arguments)
   command = "install" if command == "bootstrap"
 
   options = {
-    llvm_prefix: ENV["CPP_IDENT_RENAMER_LLVM_PREFIX"],
-    llvm_url: ENV["CPP_IDENT_RENAMER_LLVM_URL"],
-    llvm_sha256: ENV["CPP_IDENT_RENAMER_LLVM_SHA256"],
-    zig_url: ENV["CPP_IDENT_RENAMER_ZIG_URL"],
-    zig_sha256: ENV["CPP_IDENT_RENAMER_ZIG_SHA256"],
-    offline_target: ENV.fetch("CPP_IDENT_RENAMER_OFFLINE_TARGET", DEFAULT_OFFLINE_TARGET),
+    llvm_prefix: ENV["IDENT_MOD_LLVM_PREFIX"],
+    llvm_url: ENV["IDENT_MOD_LLVM_URL"],
+    llvm_sha256: ENV["IDENT_MOD_LLVM_SHA256"],
+    zig_url: ENV["IDENT_MOD_ZIG_URL"],
+    zig_sha256: ENV["IDENT_MOD_ZIG_SHA256"],
+    offline_target: ENV.fetch("IDENT_MOD_OFFLINE_TARGET", DEFAULT_OFFLINE_TARGET),
     offline: File.file?(OFFLINE_MANIFEST_PATH),
     pack_offline: false,
     clean_all: false,
@@ -1118,10 +1118,10 @@ if $PROGRAM_NAME == __FILE__
   begin
     main(ARGV.dup)
   rescue BootstrapError => error
-    warn("[cpp-ident-renamer] Error: #{error.message}")
+    warn("[ident-mod] Error: #{error.message}")
     exit 1
   rescue Interrupt
-    warn("\n[cpp-ident-renamer] Interrupted; the unfinished download remains as .part and will resume next time")
+    warn("\n[ident-mod] Interrupted; the unfinished download remains as .part and will resume next time")
     exit 130
   end
 end
