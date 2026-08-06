@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const FunctionCase = enum {
     lower_camel,
+    pascal,
     snake,
     unchanged,
 };
@@ -16,23 +17,51 @@ pub const VariableStyle = enum {
 };
 
 pub const Config = struct {
+    local_prefix: []const u8 = "",
+    static_local_prefix: []const u8 = "s_",
     member_prefix: []const u8 = "m_",
-    static_member_prefix: []const u8 = "m_",
+    static_member_prefix: []const u8 = "s_",
     global_prefix: []const u8 = "g_",
+    static_global_prefix: []const u8 = "s_",
     member_function_case: FunctionCase = .lower_camel,
     free_function_case: FunctionCase = .lower_camel,
+    scan_local: bool = true,
+    scan_static_local: bool = true,
+    scan_member: bool = true,
+    scan_static_member: bool = true,
+    scan_global: bool = true,
+    scan_static_global: bool = true,
+    scan_functions: bool = true,
     use_canonical_type: bool = true,
     pointer_marker: []const u8 = "p",
+    local_alternatives: std.ArrayList(VariableStyle) = .empty,
+    static_local_alternatives: std.ArrayList(VariableStyle) = .empty,
     member_alternatives: std.ArrayList(VariableStyle) = .empty,
     static_member_alternatives: std.ArrayList(VariableStyle) = .empty,
     global_alternatives: std.ArrayList(VariableStyle) = .empty,
+    static_global_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_local_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_static_local_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_member_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_static_member_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_global_alternatives: std.ArrayList(VariableStyle) = .empty,
+    const_static_global_alternatives: std.ArrayList(VariableStyle) = .empty,
     mappings: std.ArrayList(TypeMapping) = .empty,
     pointer_mappings: std.ArrayList(TypeMapping) = .empty,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
+        self.local_alternatives.deinit(allocator);
+        self.static_local_alternatives.deinit(allocator);
         self.member_alternatives.deinit(allocator);
         self.static_member_alternatives.deinit(allocator);
         self.global_alternatives.deinit(allocator);
+        self.static_global_alternatives.deinit(allocator);
+        self.const_local_alternatives.deinit(allocator);
+        self.const_static_local_alternatives.deinit(allocator);
+        self.const_member_alternatives.deinit(allocator);
+        self.const_static_member_alternatives.deinit(allocator);
+        self.const_global_alternatives.deinit(allocator);
+        self.const_static_global_alternatives.deinit(allocator);
         self.mappings.deinit(allocator);
         self.pointer_mappings.deinit(allocator);
     }
@@ -144,16 +173,22 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
 
         if (std.mem.eql(u8, section, "scope")) {
             const value = try parseString(allocator, value_text);
-            if (std.mem.eql(u8, key, "member")) config.member_prefix = value else if (std.mem.eql(u8, key, "static_member")) config.static_member_prefix = value else if (std.mem.eql(u8, key, "global")) config.global_prefix = value else return invalidKey(config_path, line_number, section, key);
-        } else if (std.mem.eql(u8, section, "scope_alternatives")) {
-            const alternatives = if (std.mem.eql(u8, key, "member"))
-                &config.member_alternatives
-            else if (std.mem.eql(u8, key, "static_member"))
-                &config.static_member_alternatives
-            else if (std.mem.eql(u8, key, "global"))
-                &config.global_alternatives
-            else
+            if (!setScopePrefix(&config, key, value))
                 return invalidKey(config_path, line_number, section, key);
+        } else if (std.mem.eql(u8, section, "scan")) {
+            const enabled = parseBool(value_text) orelse {
+                std.log.err("{s}:{d}: scan switches must be true or false", .{ config_path, line_number });
+                return error.InvalidConfig;
+            };
+            if (!setScanEnabled(&config, key, enabled))
+                return invalidKey(config_path, line_number, section, key);
+        } else if (std.mem.eql(u8, section, "scope_alternatives") or
+            std.mem.eql(u8, section, "scope_alternatives.const"))
+        {
+            const const_only = std.mem.eql(u8, section, "scope_alternatives.const");
+            const alternatives = findScopeAlternatives(&config, key, const_only) orelse
+                return invalidKey(config_path, line_number, section, key);
+
             parseVariableStyles(allocator, value_text, alternatives) catch |err| {
                 std.log.err("{s}:{d}: scope alternatives must be an array containing upper_snake", .{ config_path, line_number });
                 return err;
@@ -161,7 +196,7 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
         } else if (std.mem.eql(u8, section, "functions")) {
             const value = try parseString(allocator, value_text);
             const function_case = parseFunctionCase(value) orelse {
-                std.log.err("{s}:{d}: function case must be camel, snake, or unchanged", .{ config_path, line_number });
+                std.log.err("{s}:{d}: function case must be camel, pascal, snake, or unchanged", .{ config_path, line_number });
                 return error.InvalidConfig;
             };
             if (std.mem.eql(u8, key, "member")) config.member_function_case = function_case else if (std.mem.eql(u8, key, "free")) config.free_function_case = function_case else return invalidKey(config_path, line_number, section, key);
@@ -179,13 +214,76 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
                 try config.pointer_mappings.append(allocator, .{ .type_name = type_name, .prefix = value });
             }
         } else if (section.len == 0 and std.mem.eql(u8, key, "use_canonical_type")) {
-            config.use_canonical_type = if (std.mem.eql(u8, value_text, "true")) true else if (std.mem.eql(u8, value_text, "false")) false else return error.InvalidConfig;
+            config.use_canonical_type = parseBool(value_text) orelse return error.InvalidConfig;
         } else {
             return invalidKey(config_path, line_number, section, key);
         }
     }
 
     return config;
+}
+
+fn setScopePrefix(config: *Config, key: []const u8, value: []const u8) bool {
+    if (std.mem.eql(u8, key, "local")) {
+        config.local_prefix = value;
+    } else if (std.mem.eql(u8, key, "static_local")) {
+        config.static_local_prefix = value;
+    } else if (std.mem.eql(u8, key, "member")) {
+        config.member_prefix = value;
+    } else if (std.mem.eql(u8, key, "static_member")) {
+        config.static_member_prefix = value;
+    } else if (std.mem.eql(u8, key, "global")) {
+        config.global_prefix = value;
+    } else if (std.mem.eql(u8, key, "static_global")) {
+        config.static_global_prefix = value;
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+fn setScanEnabled(config: *Config, key: []const u8, enabled: bool) bool {
+    if (std.mem.eql(u8, key, "local")) {
+        config.scan_local = enabled;
+    } else if (std.mem.eql(u8, key, "static_local")) {
+        config.scan_static_local = enabled;
+    } else if (std.mem.eql(u8, key, "member")) {
+        config.scan_member = enabled;
+    } else if (std.mem.eql(u8, key, "static_member")) {
+        config.scan_static_member = enabled;
+    } else if (std.mem.eql(u8, key, "global")) {
+        config.scan_global = enabled;
+    } else if (std.mem.eql(u8, key, "static_global")) {
+        config.scan_static_global = enabled;
+    } else if (std.mem.eql(u8, key, "functions")) {
+        config.scan_functions = enabled;
+    } else {
+        return false;
+    }
+
+    return true;
+}
+
+fn findScopeAlternatives(
+    config: *Config,
+    key: []const u8,
+    const_only: bool,
+) ?*std.ArrayList(VariableStyle) {
+    if (std.mem.eql(u8, key, "local"))
+        return if (const_only) &config.const_local_alternatives else &config.local_alternatives;
+    if (std.mem.eql(u8, key, "static_local"))
+        return if (const_only) &config.const_static_local_alternatives else &config.static_local_alternatives;
+    if (std.mem.eql(u8, key, "member"))
+        return if (const_only) &config.const_member_alternatives else &config.member_alternatives;
+    if (std.mem.eql(u8, key, "static_member"))
+        return if (const_only) &config.const_static_member_alternatives else &config.static_member_alternatives;
+    if (std.mem.eql(u8, key, "global"))
+        return if (const_only) &config.const_global_alternatives else &config.global_alternatives;
+    if (std.mem.eql(u8, key, "static_global"))
+        return if (const_only) &config.const_static_global_alternatives else &config.static_global_alternatives;
+
+    return null;
 }
 
 fn parseKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
@@ -201,8 +299,16 @@ fn parseKey(allocator: std.mem.Allocator, text: []const u8) ![]const u8 {
 
 fn parseFunctionCase(value: []const u8) ?FunctionCase {
     if (std.mem.eql(u8, value, "camel")) return .lower_camel;
+    if (std.mem.eql(u8, value, "pascal")) return .pascal;
     if (std.mem.eql(u8, value, "snake")) return .snake;
     if (std.mem.eql(u8, value, "unchanged")) return .unchanged;
+
+    return null;
+}
+
+fn parseBool(value: []const u8) ?bool {
+    if (std.mem.eql(u8, value, "true")) return true;
+    if (std.mem.eql(u8, value, "false")) return false;
 
     return null;
 }
@@ -326,4 +432,13 @@ test "scope alternatives parse as a string array" {
     try parseVariableStyles(allocator, "[\"upper_snake\"]", &styles);
 
     try std.testing.expectEqualSlices(VariableStyle, &.{.upper_snake}, styles.items);
+}
+
+test "scan switches are independently configurable" {
+    var config = Config{};
+
+    try std.testing.expect(setScanEnabled(&config, "local", false));
+    try std.testing.expect(!config.scan_local);
+    try std.testing.expect(config.scan_static_local);
+    try std.testing.expect(!setScanEnabled(&config, "unknown", false));
 }

@@ -1,17 +1,29 @@
 # Copy this file to cpp-ident-renamer.toml and adapt the project-specific types.
 use_canonical_type = true
 
-[scope]
-member = "m_"
-static_member = "m_"
-global = "g_"
+[scan]
+local = true
+static_local = true
+member = true
+static_member = true
+global = true
+static_global = true
+functions = true
 
-[scope_alternatives]
+[scope]
+local = ""
+static_local = "s_"
+member = "m_"
+static_member = "s_"
+global = "g_"
+static_global = "s_"
+
+[scope_alternatives.const]
 global = ["upper_snake"]
 
 [functions]
 member = "camel"
-free = "camel"
+free = "pascal"
 
 [pointers]
 marker = "p"

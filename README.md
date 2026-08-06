@@ -5,13 +5,15 @@
 它会读取 `compile_commands.json`，遍历真实的 Clang AST，并检查：
 
 - 非静态成员变量：`numberOfSlice` → `m_nNumberOfSlice`
-- 静态成员变量：按 `static_member` 前缀检查
+- 局部变量：`char* funcName` → `char* psFuncName`
+- 静态局部、静态成员和静态全局变量：使用各自的静态前缀，例如 `char* funcName` → `char* s_psFuncName`
+- 静态成员变量：按 `static_member` 前缀检查，默认使用 `s_`
 - 全局及命名空间变量：`defaultKeyword` → `g_sDefaultKeyword`
 - 指针层级位于作用域和类型前缀之间：`char* name` → `char* m_psName`，`char** names` → `char** g_ppsNames`
-- 成员函数和自由函数：`GetSize` → `getSize`
+- 成员函数和自由函数：分别支持小驼峰、大驼峰、snake_case 或保持不变
 - 无类型映射的变量：输出 note，提醒补全项目配置
 
-局部变量、构造/析构函数、运算符、系统头文件和项目根目录以外的声明不会被检查。重复包含的头文件诊断会按文件位置去重。
+函数参数、构造/析构函数、运算符、系统头文件和项目根目录以外的声明不会被检查。重复包含的头文件诊断会按文件位置去重。
 
 ## 依赖
 
@@ -210,17 +212,29 @@ ruby build.rb test
 ```toml
 use_canonical_type = true
 
-[scope]
-member = "m_"
-static_member = "m_"
-global = "g_"
+[scan]
+local = false        # 关闭普通局部变量，static_local 不受影响
+static_local = true
+member = true
+static_member = true
+global = true
+static_global = true
+functions = true
 
-[scope_alternatives]
-global = ["upper_snake"] # TIME_ESCAPE 与 g_nTimeEscape 都视为合规
+[scope]
+local = ""           # psFuncName：无作用域前缀，只保留匈牙利规则
+static_local = "s_"  # s_psFuncName
+member = "m_"
+static_member = "s_"
+global = "g_"
+static_global = "s_"
+
+[scope_alternatives.const]
+global = ["upper_snake"] # 只有 const 全局变量可使用 TIME_ESCAPE
 
 [functions]
-member = "camel"    # camel / snake / unchanged
-free = "camel"
+member = "camel"    # camel / pascal / snake / unchanged
+free = "pascal"
 
 [pointers]
 marker = "p"
@@ -235,7 +249,20 @@ int = "n"
 
 `use_canonical_type = true` 会穿透 typedef/using；设为 `false` 时可以直接给别名配置前缀。配置中的类型条目会覆盖同名内置映射。
 
-`[scope_alternatives]` 为变量作用域增加可选的合规风格，不替换 `[scope]` 定义的主规则。目前支持 `upper_snake`，并可分别配置 `member`、`static_member` 和 `global`。如果名称不满足任何替代风格，扫描与 `--fix` 仍使用主规则生成唯一建议名称；因此上述配置同时接受 `TIME_ESCAPE` 和 `g_nTimeEscape`，而 `time_escape` 仍会建议改为 `g_nTimeEscape`。
+`[scan]` 控制哪些 AST 节点进入本工具的命名分析和 `idents.tsv` 输出，所有开关默认都是 `true`。关闭某一项不会阻止 Clang 解析或遍历 translation unit，但会跳过该作用域的类型读取、命名计算和结果记录。`local` 与 `static_local` 相互独立，因此可以关闭大量普通局部变量，同时继续检查 `s_` 开头的静态局部变量；`functions = false` 会同时关闭成员函数和自由函数扫描。
+
+`[functions]` 中的 `camel` 明确表示小驼峰，例如 `GetSize` → `getSize`；大驼峰使用 `pascal`，例如 `calculate_total` → `CalculateTotal`。`member` 控制成员函数，`free` 控制普通自由函数和非成员函数模板。
+
+`[scope]` 的作用域前缀之后仍会组合指针前缀、类型前缀和 PascalCase 名称。局部变量的 `local = ""` 因而只应用匈牙利规则；三个静态作用域可以独立配置，默认都使用 `s_`。例如 `char* funcName` 分别得到局部变量 `psFuncName`、静态局部变量 `s_psFuncName`、静态成员变量 `s_psFuncName` 和静态全局变量 `s_psFuncName`。
+
+`[scope_alternatives]` 为指定作用域的所有变量增加可选合规风格；`[scope_alternatives.const]` 只对顶层 const 变量生效。两者都不替换 `[scope]` 定义的主规则。目前支持 `upper_snake`，并可分别配置 `local`、`static_local`、`member`、`static_member`、`global` 和 `static_global`。上述配置允许 `const int TIME_ESCAPE` 和普通的 `int g_nTimeEscape`，但普通 `int TIME_ESCAPE` 仍会建议改为 `g_nTimeEscape`。
+
+const 条件根据 Clang 类型语义判断，而不是搜索源码文本。`constexpr` 变量通常具有顶层 const，因此可以匹配；`const int* value` 是“指向 const 的可变指针”，不匹配；`int* const VALUE` 是“const 指针对象”，可以匹配。typedef/using 中携带的 const 也会通过 canonical type 被识别。若希望不区分 const、所有全局变量都接受大写下划线，继续使用无 `.const` 的配置：
+
+```toml
+[scope_alternatives]
+global = ["upper_snake"]
+```
 
 指针规则的组合顺序固定为 `scope + pointer + type + PascalName`。每增加一级指针就增加一个 `marker`；`[pointers]` 中的类型映射优先于 `[types]`，所以普通 `char` 仍可使用 `ch`，而 `char*` 使用字符串前缀 `s`。例如 `int*` 使用普通 `int = "n"` 映射得到 `m_pnCount`。
 

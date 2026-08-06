@@ -1,9 +1,12 @@
 use_canonical_type = true
 
 [scope]
+local = ""
+static_local = "s_"
 member = "m_"
 static_member = "m_"
 global = "g_"
+static_global = "s_"
 
 [functions]
 member = "camel"

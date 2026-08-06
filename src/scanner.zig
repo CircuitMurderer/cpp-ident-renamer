@@ -537,27 +537,53 @@ fn visit(cursor: c.CXCursor, parent: c.CXCursor, client_data: c.CXClientData) ca
 fn inspectCursor(context: *Context, cursor: c.CXCursor) !void {
     const kind = c.clang_getCursorKind(cursor);
     if (kind == c.CXCursor_FieldDecl) {
-        try inspectVariable(context, cursor, .member);
+        try inspectVariableIfEnabled(context, cursor, .member);
     } else if (kind == c.CXCursor_VarDecl) {
         const parent = c.clang_getCursorSemanticParent(cursor);
         const parent_kind = c.clang_getCursorKind(parent);
         if (isRecord(parent_kind)) {
-            try inspectVariable(context, cursor, .static_member);
+            try inspectVariableIfEnabled(context, cursor, .static_member);
         } else if (parent_kind == c.CXCursor_TranslationUnit or parent_kind == c.CXCursor_Namespace) {
-            try inspectVariable(context, cursor, .global);
+            const scope: naming.VariableScope = if (isStaticVariable(cursor)) .static_global else .global;
+            try inspectVariableIfEnabled(context, cursor, scope);
+        } else {
+            const scope: naming.VariableScope = if (isStaticVariable(cursor)) .static_local else .local;
+            try inspectVariableIfEnabled(context, cursor, scope);
         }
-    } else if (kind == c.CXCursor_CXXMethod) {
+    } else if (context.config.scan_functions and kind == c.CXCursor_CXXMethod) {
         try inspectFunction(context, cursor, context.config.member_function_case);
-    } else if (kind == c.CXCursor_FunctionTemplate) {
+    } else if (context.config.scan_functions and kind == c.CXCursor_FunctionTemplate) {
         const semantic_parent = c.clang_getCursorSemanticParent(cursor);
         const function_case = if (isRecord(c.clang_getCursorKind(semantic_parent)))
             context.config.member_function_case
         else
             context.config.free_function_case;
         try inspectFunction(context, cursor, function_case);
-    } else if (kind == c.CXCursor_FunctionDecl) {
+    } else if (context.config.scan_functions and kind == c.CXCursor_FunctionDecl) {
         try inspectFunction(context, cursor, context.config.free_function_case);
     }
+}
+
+fn isStaticVariable(cursor: c.CXCursor) bool {
+    return c.clang_Cursor_getStorageClass(cursor) == c.CX_SC_Static;
+}
+
+fn inspectVariableIfEnabled(
+    context: *Context,
+    cursor: c.CXCursor,
+    scope: naming.VariableScope,
+) !void {
+    const enabled = switch (scope) {
+        .local => context.config.scan_local,
+        .static_local => context.config.scan_static_local,
+        .member => context.config.scan_member,
+        .static_member => context.config.scan_static_member,
+        .global => context.config.scan_global,
+        .static_global => context.config.scan_static_global,
+    };
+    if (!enabled) return;
+
+    try inspectVariable(context, cursor, scope);
 }
 
 fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.VariableScope) !void {
@@ -569,6 +595,7 @@ fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.Variable
     const usr = try cursorString(context.allocator, c.clang_getCursorUSR(cursor));
     defer context.allocator.free(usr);
     const raw_type = c.clang_getCursorType(cursor);
+    const is_top_level_const = c.clang_isConstQualifiedType(c.clang_getCanonicalType(raw_type)) != 0;
     const selected_type = if (context.config.use_canonical_type) c.clang_getCanonicalType(raw_type) else raw_type;
     const type_spelling = try cursorString(context.allocator, c.clang_getTypeSpelling(selected_type));
     defer context.allocator.free(type_spelling);
@@ -579,6 +606,7 @@ fn inspectVariable(context: *Context, cursor: c.CXCursor, scope: naming.Variable
         context.allocator,
         context.config,
         scope,
+        is_top_level_const,
         base_type_spelling,
         pointer_info.depth,
         old_name,

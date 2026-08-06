@@ -1,28 +1,53 @@
 const std = @import("std");
 const config_mod = @import("config.zig");
 
-pub const VariableScope = enum { member, static_member, global };
+pub const VariableScope = enum {
+    local,
+    static_local,
+    member,
+    static_member,
+    global,
+    static_global,
+};
 
 pub fn variableName(
     allocator: std.mem.Allocator,
     config: *const config_mod.Config,
     scope: VariableScope,
+    is_top_level_const: bool,
     type_spelling: []const u8,
     pointer_depth: usize,
     old_name: []const u8,
 ) !?[]u8 {
     const alternatives = switch (scope) {
+        .local => config.local_alternatives.items,
+        .static_local => config.static_local_alternatives.items,
         .member => config.member_alternatives.items,
         .static_member => config.static_member_alternatives.items,
         .global => config.global_alternatives.items,
+        .static_global => config.static_global_alternatives.items,
     };
     if (matchesAlternative(alternatives, old_name)) return try allocator.dupe(u8, old_name);
+    if (is_top_level_const) {
+        const const_alternatives = switch (scope) {
+            .local => config.const_local_alternatives.items,
+            .static_local => config.const_static_local_alternatives.items,
+            .member => config.const_member_alternatives.items,
+            .static_member => config.const_static_member_alternatives.items,
+            .global => config.const_global_alternatives.items,
+            .static_global => config.const_static_global_alternatives.items,
+        };
+        if (matchesAlternative(const_alternatives, old_name)) return try allocator.dupe(u8, old_name);
+    }
 
     const type_prefix = config.typePrefix(type_spelling, pointer_depth) orelse return null;
     const scope_prefix = switch (scope) {
+        .local => config.local_prefix,
+        .static_local => config.static_local_prefix,
         .member => config.member_prefix,
         .static_member => config.static_member_prefix,
         .global => config.global_prefix,
+        .static_global => config.static_global_prefix,
     };
 
     const base = stripKnownPrefix(config, scope_prefix, type_prefix, pointer_depth, old_name);
@@ -73,6 +98,7 @@ pub fn functionName(
 ) ![]u8 {
     return switch (function_case) {
         .lower_camel => toLowerCamel(allocator, old_name),
+        .pascal => toPascal(allocator, old_name),
         .snake => toSnake(allocator, old_name),
         .unchanged => allocator.dupe(u8, old_name),
     };
@@ -91,9 +117,16 @@ fn stripKnownPrefix(
     name: []const u8,
 ) []const u8 {
     var result = name;
-    if (std.mem.startsWith(u8, result, scope_prefix)) {
+    if (scope_prefix.len > 0 and std.mem.startsWith(u8, result, scope_prefix)) {
         result = result[scope_prefix.len..];
-    } else inline for (.{ config.member_prefix, config.static_member_prefix, config.global_prefix }) |known_scope| {
+    } else inline for (.{
+        config.local_prefix,
+        config.static_local_prefix,
+        config.member_prefix,
+        config.static_member_prefix,
+        config.global_prefix,
+        config.static_global_prefix,
+    }) |known_scope| {
         if (known_scope.len > 0 and std.mem.startsWith(u8, result, known_scope)) {
             result = result[known_scope.len..];
             break;
@@ -189,11 +222,11 @@ test "variable naming strips an existing convention" {
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
 
-    const first = (try variableName(allocator, &config, .member, "int", 0, "numberOfSlice")).?;
+    const first = (try variableName(allocator, &config, .member, false, "int", 0, "numberOfSlice")).?;
     defer allocator.free(first);
     try std.testing.expectEqualStrings("m_nNumberOfSlice", first);
 
-    const second = (try variableName(allocator, &config, .member, "int", 0, "m_sNumberOfSlice")).?;
+    const second = (try variableName(allocator, &config, .member, false, "int", 0, "m_sNumberOfSlice")).?;
     defer allocator.free(second);
     try std.testing.expectEqualStrings("m_nNumberOfSlice", second);
 }
@@ -203,21 +236,39 @@ test "pointer depth sits between scope and type prefixes" {
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
 
-    const member = (try variableName(allocator, &config, .member, "char", 1, "name")).?;
+    const member = (try variableName(allocator, &config, .member, false, "char", 1, "name")).?;
     defer allocator.free(member);
     try std.testing.expectEqualStrings("m_psName", member);
 
-    const global = (try variableName(allocator, &config, .global, "const char", 2, "names")).?;
+    const global = (try variableName(allocator, &config, .global, false, "const char", 2, "names")).?;
     defer allocator.free(global);
     try std.testing.expectEqualStrings("g_ppsNames", global);
 
-    const corrected = (try variableName(allocator, &config, .member, "char", 1, "m_pchName")).?;
+    const corrected = (try variableName(allocator, &config, .member, false, "char", 1, "m_pchName")).?;
     defer allocator.free(corrected);
     try std.testing.expectEqualStrings("m_psName", corrected);
 
-    const integer = (try variableName(allocator, &config, .member, "int", 1, "count")).?;
+    const integer = (try variableName(allocator, &config, .member, false, "int", 1, "count")).?;
     defer allocator.free(integer);
     try std.testing.expectEqualStrings("m_pnCount", integer);
+}
+
+test "local and static variables keep Hungarian type prefixes" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    const local = (try variableName(allocator, &config, .local, false, "char", 1, "funcName")).?;
+    defer allocator.free(local);
+    try std.testing.expectEqualStrings("psFuncName", local);
+
+    const static_local = (try variableName(allocator, &config, .static_local, false, "char", 1, "funcName")).?;
+    defer allocator.free(static_local);
+    try std.testing.expectEqualStrings("s_psFuncName", static_local);
+
+    const static_member = (try variableName(allocator, &config, .static_member, false, "int", 0, "count")).?;
+    defer allocator.free(static_member);
+    try std.testing.expectEqualStrings("s_nCount", static_member);
 }
 
 test "global upper snake is accepted as an alternative" {
@@ -226,17 +277,32 @@ test "global upper snake is accepted as an alternative" {
     defer config.deinit(allocator);
     try config.global_alternatives.append(allocator, .upper_snake);
 
-    const alternative = (try variableName(allocator, &config, .global, "int", 0, "TIME_ESCAPE")).?;
+    const alternative = (try variableName(allocator, &config, .global, false, "int", 0, "TIME_ESCAPE")).?;
     defer allocator.free(alternative);
     try std.testing.expectEqualStrings("TIME_ESCAPE", alternative);
 
-    const primary = (try variableName(allocator, &config, .global, "int", 0, "g_nTimeEscape")).?;
+    const primary = (try variableName(allocator, &config, .global, false, "int", 0, "g_nTimeEscape")).?;
     defer allocator.free(primary);
     try std.testing.expectEqualStrings("g_nTimeEscape", primary);
 
-    const invalid = (try variableName(allocator, &config, .global, "int", 0, "time_escape")).?;
+    const invalid = (try variableName(allocator, &config, .global, false, "int", 0, "time_escape")).?;
     defer allocator.free(invalid);
     try std.testing.expect(!std.mem.eql(u8, "time_escape", invalid));
+}
+
+test "const alternatives require a top-level const variable" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    try config.const_global_alternatives.append(allocator, .upper_snake);
+
+    const accepted = (try variableName(allocator, &config, .global, true, "int", 0, "TIME_ESCAPE")).?;
+    defer allocator.free(accepted);
+    try std.testing.expectEqualStrings("TIME_ESCAPE", accepted);
+
+    const rejected = (try variableName(allocator, &config, .global, false, "int", 0, "TIME_ESCAPE")).?;
+    defer allocator.free(rejected);
+    try std.testing.expect(!std.mem.eql(u8, "TIME_ESCAPE", rejected));
 }
 
 test "function casing handles PascalCase and initialisms" {
@@ -249,4 +315,8 @@ test "function casing handles PascalCase and initialisms" {
     const acronym = try functionName(allocator, .lower_camel, "HTTPServer");
     defer allocator.free(acronym);
     try std.testing.expectEqualStrings("httpServer", acronym);
+
+    const pascal = try functionName(allocator, .pascal, "compute_value");
+    defer allocator.free(pascal);
+    try std.testing.expectEqualStrings("ComputeValue", pascal);
 }

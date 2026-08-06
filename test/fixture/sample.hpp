@@ -24,5 +24,6 @@ private:
 };
 
 int ComputeValue();
+int calculateTotal();
 
 } // namespace project
