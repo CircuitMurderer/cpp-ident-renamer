@@ -1,5 +1,12 @@
 use_canonical_type = true
 
+[clang]
+downgrade_all_warnings = false
+downgrade_warnings = ["-Wsign-conversion"]
+
+[variables]
+case = "pascal"
+
 [scan]
 local = true
 static_local = true

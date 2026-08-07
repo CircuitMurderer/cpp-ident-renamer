@@ -62,7 +62,7 @@ cd /path/to/workdir
 
 ```text
 idents.tsv             可修复的命名标记
-clang_problems.json    按 -Wxxx 分组的 Clang warning/error
+clang_problems.json    普通扫描时生成；按 -Wxxx 分组 Clang warning/error
 ```
 
 审核并修复：
@@ -76,7 +76,7 @@ ident-mod check -p build --root . --fix
 ident-mod check -p build --root . -f
 ```
 
-`--fix` 仍会完整扫描。`idents.tsv` 不存在或为空时不会修改源码，也不会重写该文件。
+`--fix` 仍会完整扫描。`idents.tsv` 不存在或为空时不会修改源码，也不会重写该文件；修复模式不会创建或覆盖 `clang_problems.json`。
 
 ```sh
 ident-mod --help
@@ -95,6 +95,13 @@ cp ident-mod.toml.example ident-mod.toml
 ```toml
 # true：typedef/using 按底层类型匹配；false：可直接配置别名
 use_canonical_type = true
+
+[clang]
+downgrade_all_warnings = false
+downgrade_warnings = ["sign-conversion", "conversion"]
+
+[variables]
+case = "pascal"       # pascal / camel / snake
 
 [scan]
 local = false         # 普通局部变量
@@ -140,10 +147,50 @@ double = "d"
 "project::Response" = "rsp"
 ```
 
+Clang warning 被 `-Werror` 提升时，可以全部或按分组恢复成 warning；真正的语法、类型和头文件错误仍会阻止修复：
+
+```toml
+[clang]
+
+# 移除 -Werror，并把 -Werror=xxx 改成 -Wxxx
+downgrade_all_warnings = true
+
+# 选择性追加 -Wno-error=xxx；可直接复制 clang_problems.json 中的 -Wxxx
+downgrade_warnings = ["sign-conversion", "-Wconversion"]
+```
+
+不使用类型前缀时，把变量主体改为小驼峰，并将对应类型映射为空：
+
+```toml
+[variables]
+case = "camel"
+
+[types]
+int = ""
+bool = ""
+"std::string" = ""
+```
+
+```text
+int funcName          -> m_funcName
+static int funcName   -> s_funcName
+```
+
+下划线命名使用同一开关：
+
+```toml
+[variables]
+case = "snake"        # funcName -> m_func_name（int = ""）
+
+[functions]
+member = "snake"      # GetSize -> get_size
+free = "snake"        # CalculateTotal -> calculate_total
+```
+
 命名组合：
 
 ```text
-作用域前缀 + 每级指针的 p + 类型前缀 + PascalCase 名称
+作用域前缀 + 每级指针的 p + 类型前缀 + 按 variables.case 格式化的名称
 
 char* funcName             -> psFuncName
 static char* funcName      -> s_psFuncName

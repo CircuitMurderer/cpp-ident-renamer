@@ -158,7 +158,8 @@ fn run(io: std.Io, allocator: std.mem.Allocator, out: *std.Io.Writer, options: O
         .names = result.violationCount(),
     });
 
-    try clang_problems.write(io, allocator, options.project_root, &result);
+    if (!options.fix)
+        try clang_problems.write(io, allocator, options.project_root, &result);
 
     var selection = if (options.fix)
         try idents.load(io, allocator, options.project_root)
@@ -220,6 +221,7 @@ fn performFix(
         io,
         allocator,
         database,
+        config,
         project_root,
         selected.items,
     );

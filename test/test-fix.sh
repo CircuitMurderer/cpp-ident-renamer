@@ -24,18 +24,32 @@ run_expect() {
 }
 
 fixture_before=$(cksum test/fixture/sample.cpp test/fixture/sample.hpp)
-run_expect 1 "$tool" check \
+set +e
+"$tool" check \
   -p test/fixture/compile_commands.json \
   -c test/fixture/ident-mod.toml \
-  --root . --fix
+  --root . --fix >/dev/null 2>fix-progress.txt
+status=$?
+set -e
+
+[ "$status" -eq 1 ]
 [ ! -e idents.tsv ]
+[ ! -e clang_problems.json ]
 [ "$fixture_before" = "$(cksum test/fixture/sample.cpp test/fixture/sample.hpp)" ]
+grep -q '^Warnings: 1$' fix-progress.txt
+grep -q '^Errors: 0$' fix-progress.txt
+grep -q '^Names: [1-9][0-9]*$' fix-progress.txt
+if grep -q -- '-Wsign-conversion' fix-progress.txt; then
+  exit 1
+fi
 
 run_expect 1 "$tool" check \
   -p test/fixture/compile_commands.json \
   -c test/fixture/ident-mod.toml \
   --root .
 [ -s idents.tsv ]
+[ -s clang_problems.json ]
+clang_problems_before=$(cksum clang_problems.json)
 
 : > idents.tsv
 run_expect 1 "$tool" check \
@@ -43,6 +57,7 @@ run_expect 1 "$tool" check \
   -c test/fixture/ident-mod.toml \
   --root . --fix
 [ ! -s idents.tsv ]
+[ "$clang_problems_before" = "$(cksum clang_problems.json)" ]
 [ "$fixture_before" = "$(cksum test/fixture/sample.cpp test/fixture/sample.hpp)" ]
 
 run_expect 1 "$tool" check \

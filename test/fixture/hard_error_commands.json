@@ -1,0 +1,15 @@
+[
+  {
+    "directory": ".",
+    "file": "test/fixture/hard_error.cpp",
+    "arguments": [
+      "clang++",
+      "-std=c++17",
+      "-Werror",
+      "-c",
+      "test/fixture/hard_error.cpp",
+      "-o",
+      "test/fixture/hard_error.o"
+    ]
+  }
+]

@@ -176,7 +176,7 @@ pub fn scan(
             owned_args.deinit(allocator);
         }
 
-        try prepareArguments(allocator, entry, &owned_args);
+        try prepareArguments(allocator, entry, config, &owned_args);
 
         var arg_ptrs: std.ArrayList([*c]const u8) = .empty;
         defer arg_ptrs.deinit(allocator);
@@ -315,6 +315,7 @@ pub fn collectReplacements(
     io: std.Io,
     allocator: std.mem.Allocator,
     database: *const compilation_db.Database,
+    config: *const config_mod.Config,
     project_root_arg: []const u8,
     diagnostics: []const Diagnostic,
 ) !ReplacementPlan {
@@ -364,7 +365,7 @@ pub fn collectReplacements(
             owned_args.deinit(allocator);
         }
 
-        try prepareArguments(allocator, entry, &owned_args);
+        try prepareArguments(allocator, entry, config, &owned_args);
 
         var arg_ptrs: std.ArrayList([*c]const u8) = .empty;
         defer arg_ptrs.deinit(allocator);
@@ -775,7 +776,12 @@ fn lessThan(_: void, a: Diagnostic, b: Diagnostic) bool {
     return a.column < b.column;
 }
 
-fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, output: *std.ArrayList([:0]u8)) !void {
+fn prepareArguments(
+    allocator: std.mem.Allocator,
+    entry: compilation_db.Entry,
+    config: *const config_mod.Config,
+    output: *std.ArrayList([:0]u8),
+) !void {
     const compiler_index: usize = if (entry.arguments.len > 1 and isCompilerWrapper(entry.arguments[0])) 1 else 0;
 
     try output.append(allocator, try allocator.dupeZ(u8, entry.arguments[compiler_index]));
@@ -790,6 +796,20 @@ fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, o
     var i: usize = compiler_index + 1;
     while (i < entry.arguments.len) : (i += 1) {
         const arg = entry.arguments[i];
+
+        if (config.clang_downgrade_all_warnings) {
+            if (std.mem.eql(u8, arg, "-Werror")) continue;
+
+            const prefix = "-Werror=";
+            if (std.mem.startsWith(u8, arg, prefix) and arg.len > prefix.len) {
+                try output.append(
+                    allocator,
+                    try std.fmt.allocPrintSentinel(allocator, "-W{s}", .{arg[prefix.len..]}, 0),
+                );
+                continue;
+            }
+        }
+
         if (std.mem.eql(u8, arg, "-c") or std.mem.eql(u8, arg, "-MD") or std.mem.eql(u8, arg, "-MMD")) continue;
         if (std.mem.eql(u8, arg, "-o") or std.mem.eql(u8, arg, "-MF") or
             std.mem.eql(u8, arg, "-MT") or std.mem.eql(u8, arg, "-MQ"))
@@ -803,6 +823,17 @@ fn prepareArguments(allocator: std.mem.Allocator, entry: compilation_db.Entry, o
             if (std.mem.eql(u8, resolved, entry.file)) continue;
         }
         try output.append(allocator, try allocator.dupeZ(u8, arg));
+    }
+
+    if (config.clang_downgrade_all_warnings)
+        try output.append(allocator, try allocator.dupeZ(u8, "-Wno-error"));
+
+    for (config.clang_downgrade_warnings.items) |configured_group| {
+        const group = config_mod.warningGroupName(configured_group).?;
+        try output.append(
+            allocator,
+            try std.fmt.allocPrintSentinel(allocator, "-Wno-error={s}", .{group}, 0),
+        );
     }
 }
 
@@ -940,6 +971,70 @@ fn appendClangProblem(
     try result.clang_problems.append(allocator, problem);
     errdefer _ = result.clang_problems.pop();
     try problem_indices.put(key, index);
+}
+
+fn containsArgument(arguments: []const [:0]u8, expected: []const u8) bool {
+    for (arguments) |argument| {
+        if (std.mem.eql(u8, argument, expected)) return true;
+    }
+
+    return false;
+}
+
+test "downgrade all warnings removes every Werror promotion" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    config.clang_downgrade_all_warnings = true;
+
+    const entry = compilation_db.Entry{
+        .directory = "/project",
+        .file = "/project/sample.cpp",
+        .arguments = &.{
+            "clang++",
+            "-Werror",
+            "-Werror=sign-conversion",
+            "-c",
+            "sample.cpp",
+        },
+    };
+
+    var arguments: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (arguments.items) |argument| allocator.free(argument);
+        arguments.deinit(allocator);
+    }
+
+    try prepareArguments(allocator, entry, &config, &arguments);
+
+    try std.testing.expect(!containsArgument(arguments.items, "-Werror"));
+    try std.testing.expect(!containsArgument(arguments.items, "-Werror=sign-conversion"));
+    try std.testing.expect(containsArgument(arguments.items, "-Wsign-conversion"));
+    try std.testing.expect(containsArgument(arguments.items, "-Wno-error"));
+}
+
+test "selective downgrade appends a matching Clang override" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    try config.clang_downgrade_warnings.append(allocator, "-Wsign-conversion");
+
+    const entry = compilation_db.Entry{
+        .directory = "/project",
+        .file = "/project/sample.cpp",
+        .arguments = &.{ "clang++", "-Werror=sign-conversion", "-c", "sample.cpp" },
+    };
+
+    var arguments: std.ArrayList([:0]u8) = .empty;
+    defer {
+        for (arguments.items) |argument| allocator.free(argument);
+        arguments.deinit(allocator);
+    }
+
+    try prepareArguments(allocator, entry, &config, &arguments);
+
+    try std.testing.expect(containsArgument(arguments.items, "-Werror=sign-conversion"));
+    try std.testing.expect(containsArgument(arguments.items, "-Wno-error=sign-conversion"));
 }
 
 test "detects explicit Clang resource directory arguments" {

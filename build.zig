@@ -65,7 +65,9 @@ pub fn build(b: *std.Build) void {
     e2e_run.addFileArg(b.path("test/test-scan.sh"));
     e2e_run.addArtifactArg(exe);
     e2e_run.addFileInput(b.path("test/fixture/compile_commands.json"));
+    e2e_run.addFileInput(b.path("test/fixture/hard_error_commands.json"));
     e2e_run.addFileInput(b.path("test/fixture/ident-mod.toml"));
+    e2e_run.addFileInput(b.path("test/fixture/hard_error.cpp"));
     e2e_run.addFileInput(b.path("test/fixture/sample.cpp"));
     e2e_run.addFileInput(b.path("test/fixture/sample.hpp"));
     const e2e_step = b.step("test-e2e", "Run the checker against the C++ fixture");

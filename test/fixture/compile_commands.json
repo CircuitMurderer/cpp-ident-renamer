@@ -5,7 +5,7 @@
     "arguments": [
       "clang++",
       "-std=c++17",
-      "-Wsign-conversion",
+      "-Werror=sign-conversion",
       "-Itest/fixture",
       "-c",
       "test/fixture/sample.cpp",

@@ -1,6 +1,13 @@
 # Copy this file to ident-mod.toml and adapt the project-specific types.
 use_canonical_type = true
 
+[clang]
+downgrade_all_warnings = false
+downgrade_warnings = [] # "sign-conversion" or "-Wsign-conversion"
+
+[variables]
+case = "pascal" # pascal / camel / snake
+
 [scan]
 local = true
 static_local = true

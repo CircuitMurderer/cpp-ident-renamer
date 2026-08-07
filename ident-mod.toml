@@ -1,6 +1,13 @@
 # Project-specific configuration for ident-mod.
 use_canonical_type = true
 
+[clang]
+downgrade_all_warnings = false
+downgrade_warnings = []
+
+[variables]
+case = "pascal"
+
 [scan]
 local = true
 static_local = true

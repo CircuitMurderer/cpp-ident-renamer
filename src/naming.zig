@@ -54,17 +54,21 @@ pub fn variableName(
     };
 
     const base = stripKnownPrefix(config, scope_prefix, type_prefix, pointer_depth, old_name);
-    const pascal = try toPascal(allocator, base);
-    defer allocator.free(pascal);
+    const cased_base = switch (config.variable_case) {
+        .lower_camel => try toLowerCamel(allocator, base),
+        .pascal => try toPascal(allocator, base),
+        .snake => try toSnake(allocator, base),
+    };
+    defer allocator.free(cased_base);
 
-    const result_len = scope_prefix.len + config.pointer_marker.len * pointer_depth + type_prefix.len + pascal.len;
+    const result_len = scope_prefix.len + config.pointer_marker.len * pointer_depth + type_prefix.len + cased_base.len;
     const result = try allocator.alloc(u8, result_len);
 
     var position: usize = 0;
     position = copyPart(result, position, scope_prefix);
     for (0..pointer_depth) |_| position = copyPart(result, position, config.pointer_marker);
     position = copyPart(result, position, type_prefix);
-    _ = copyPart(result, position, pascal);
+    _ = copyPart(result, position, cased_base);
 
     return result;
 }
@@ -276,6 +280,34 @@ test "local and static variables keep Hungarian type prefixes" {
     try std.testing.expectEqualStrings("s_nCount", static_member);
 }
 
+test "camel variables allow an empty type prefix" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    config.variable_case = .lower_camel;
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "" });
+
+    const member = (try variableName(allocator, &config, .member, false, "int", 0, "func_name")).?;
+    defer allocator.free(member);
+    try std.testing.expectEqualStrings("m_funcName", member);
+
+    const migrated = (try variableName(allocator, &config, .member, false, "int", 0, "m_nFuncName")).?;
+    defer allocator.free(migrated);
+    try std.testing.expectEqualStrings("m_funcName", migrated);
+}
+
+test "snake variables allow an empty type prefix" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    config.variable_case = .snake;
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "" });
+
+    const member = (try variableName(allocator, &config, .member, false, "int", 0, "FuncName")).?;
+    defer allocator.free(member);
+    try std.testing.expectEqualStrings("m_func_name", member);
+}
+
 test "global upper snake is accepted as an alternative" {
     const allocator = std.testing.allocator;
     var config = try config_mod.Config.initDefaults(allocator);
@@ -324,4 +356,8 @@ test "function casing handles PascalCase and initialisms" {
     const pascal = try functionName(allocator, .pascal, "compute_value");
     defer allocator.free(pascal);
     try std.testing.expectEqualStrings("ComputeValue", pascal);
+
+    const snake = try functionName(allocator, .snake, "CalculateHTTPValue");
+    defer allocator.free(snake);
+    try std.testing.expectEqualStrings("calculate_http_value", snake);
 }
