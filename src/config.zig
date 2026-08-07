@@ -46,6 +46,7 @@ pub const Config = struct {
     clang_downgrade_warnings: std.ArrayList([]const u8) = .empty,
 
     use_canonical_type: bool = true,
+    legacy_prefixes: bool = true,
     pointer_marker: []const u8 = "p",
 
     local_alternatives: std.ArrayList(VariableStyle) = .empty,
@@ -64,6 +65,8 @@ pub const Config = struct {
 
     mappings: std.ArrayList(TypeMapping) = .empty,
     pointer_mappings: std.ArrayList(TypeMapping) = .empty,
+    legacy_mappings: std.ArrayList(TypeMapping) = .empty,
+    legacy_pointer_mappings: std.ArrayList(TypeMapping) = .empty,
 
     pub fn deinit(self: *Config, allocator: std.mem.Allocator) void {
         self.clang_downgrade_warnings.deinit(allocator);
@@ -84,13 +87,15 @@ pub const Config = struct {
 
         self.mappings.deinit(allocator);
         self.pointer_mappings.deinit(allocator);
+        self.legacy_mappings.deinit(allocator);
+        self.legacy_pointer_mappings.deinit(allocator);
     }
 
     pub fn initDefaults(allocator: std.mem.Allocator) !Config {
         var config = Config{};
         errdefer config.deinit(allocator);
 
-        const defaults = [_]TypeMapping{
+        const legacy_defaults = [_]TypeMapping{
             .{ .type_name = "bool", .prefix = "b" },
             .{ .type_name = "char", .prefix = "ch" },
             .{ .type_name = "short", .prefix = "n" },
@@ -106,9 +111,27 @@ pub const Config = struct {
             .{ .type_name = "std::vector", .prefix = "vec" },
             .{ .type_name = "std::map", .prefix = "map" },
         };
+        const neutral_defaults = [_]TypeMapping{
+            .{ .type_name = "bool", .prefix = "" },
+            .{ .type_name = "char", .prefix = "" },
+            .{ .type_name = "short", .prefix = "" },
+            .{ .type_name = "int", .prefix = "" },
+            .{ .type_name = "long", .prefix = "" },
+            .{ .type_name = "long long", .prefix = "" },
+            .{ .type_name = "unsigned int", .prefix = "" },
+            .{ .type_name = "unsigned long", .prefix = "" },
+            .{ .type_name = "float", .prefix = "" },
+            .{ .type_name = "double", .prefix = "" },
+            .{ .type_name = "std::string", .prefix = "" },
+            .{ .type_name = "std::basic_string<char>", .prefix = "" },
+            .{ .type_name = "std::vector", .prefix = "" },
+            .{ .type_name = "std::map", .prefix = "" },
+        };
 
-        try config.mappings.appendSlice(allocator, &defaults);
-        try config.pointer_mappings.append(allocator, .{ .type_name = "char", .prefix = "s" });
+        try config.legacy_mappings.appendSlice(allocator, &legacy_defaults);
+        try config.mappings.appendSlice(allocator, &neutral_defaults);
+        try config.legacy_pointer_mappings.append(allocator, .{ .type_name = "char", .prefix = "s" });
+        try config.pointer_mappings.append(allocator, .{ .type_name = "char", .prefix = "" });
 
         return config;
     }
@@ -129,10 +152,7 @@ pub const Config = struct {
             i -= 1;
             const mapping = mappings[i];
 
-            if (std.mem.eql(u8, spelling, mapping.type_name)) return mapping.prefix;
-            if (std.mem.startsWith(u8, spelling, mapping.type_name) and
-                spelling.len > mapping.type_name.len and
-                spelling[mapping.type_name.len] == '<') return mapping.prefix;
+            if (typeNameMatchesNormalized(spelling, mapping.type_name)) return mapping.prefix;
         }
 
         return null;
@@ -155,6 +175,17 @@ pub const Config = struct {
         return result;
     }
 };
+
+pub fn typeNameMatches(spelling: []const u8, configured_type: []const u8) bool {
+    return typeNameMatchesNormalized(Config.normalizeTypeSpelling(spelling), configured_type);
+}
+
+fn typeNameMatchesNormalized(spelling: []const u8, configured_type: []const u8) bool {
+    if (std.mem.eql(u8, spelling, configured_type)) return true;
+    return std.mem.startsWith(u8, spelling, configured_type) and
+        spelling.len > configured_type.len and
+        spelling[configured_type.len] == '<';
+}
 
 pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config {
     var config = try Config.initDefaults(allocator);
@@ -216,6 +247,14 @@ pub fn load(io: std.Io, allocator: std.mem.Allocator, path: ?[]const u8) !Config
             } else {
                 return invalidKey(config_path, line_number, section, key);
             }
+        } else if (std.mem.eql(u8, section, "migration")) {
+            if (!std.mem.eql(u8, key, "legacy_prefixes"))
+                return invalidKey(config_path, line_number, section, key);
+
+            config.legacy_prefixes = parseBool(value_text) orelse {
+                std.log.err("{s}:{d}: legacy_prefixes must be true or false", .{ config_path, line_number });
+                return error.InvalidConfig;
+            };
         } else if (std.mem.eql(u8, section, "variables")) {
             if (!std.mem.eql(u8, key, "case"))
                 return invalidKey(config_path, line_number, section, key);
@@ -579,4 +618,38 @@ test "Clang warning groups accept names copied from diagnostics" {
     try std.testing.expectEqual(@as(usize, 2), groups.items.len);
     try std.testing.expectEqualStrings("sign-conversion", warningGroupName(groups.items[0]).?);
     try std.testing.expectEqualStrings("conversion", warningGroupName(groups.items[1]).?);
+}
+
+test "built-in type mappings are neutral" {
+    const allocator = std.testing.allocator;
+    var config = try Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    try std.testing.expectEqualStrings("", config.typePrefix("int", 0).?);
+    try std.testing.expectEqualStrings("", config.typePrefix("char", 1).?);
+    try std.testing.expect(config.legacy_prefixes);
+}
+
+test "migration section can disable legacy prefixes" {
+    const io = std.testing.io;
+    const allocator = std.testing.allocator;
+    var temporary = std.testing.tmpDir(.{});
+    defer temporary.cleanup();
+
+    try temporary.dir.writeFile(io, .{
+        .sub_path = "ident-mod.toml",
+        .data = "[migration]\nlegacy_prefixes = false\n",
+    });
+    const path = try temporary.dir.realPathFileAlloc(io, "ident-mod.toml", allocator);
+    defer allocator.free(path);
+
+    var config = try load(io, allocator, path);
+    defer config.deinit(allocator);
+    try std.testing.expect(!config.legacy_prefixes);
+}
+
+test "type matching shares lookup semantics" {
+    try std.testing.expect(typeNameMatches("const std::vector<int>", "std::vector"));
+    try std.testing.expect(typeNameMatches("volatile int", "int"));
+    try std.testing.expect(!typeNameMatches("std::string", "int"));
 }

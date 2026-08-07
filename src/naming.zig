@@ -53,7 +53,20 @@ pub fn variableName(
         .static_global => config.static_global_prefix,
     };
 
-    const base = stripKnownPrefix(config, scope_prefix, type_prefix, pointer_depth, old_name);
+    const pointer_separator = pointerSeparator(config, type_prefix, pointer_depth);
+    const type_separator = typeSeparator(config, type_prefix);
+    const pascal_base = config.variable_case == .pascal;
+    const base = stripKnownPrefix(
+        config,
+        scope_prefix,
+        type_prefix,
+        pointer_depth,
+        pointer_separator,
+        type_separator,
+        pascal_base,
+        type_spelling,
+        old_name,
+    );
     const cased_base = switch (config.variable_case) {
         .lower_camel => try toLowerCamel(allocator, base),
         .pascal => try toPascal(allocator, base),
@@ -61,13 +74,16 @@ pub fn variableName(
     };
     defer allocator.free(cased_base);
 
-    const result_len = scope_prefix.len + config.pointer_marker.len * pointer_depth + type_prefix.len + cased_base.len;
+    const result_len = scope_prefix.len + config.pointer_marker.len * pointer_depth +
+        pointer_separator.len + type_prefix.len + type_separator.len + cased_base.len;
     const result = try allocator.alloc(u8, result_len);
 
     var position: usize = 0;
     position = copyPart(result, position, scope_prefix);
     for (0..pointer_depth) |_| position = copyPart(result, position, config.pointer_marker);
+    position = copyPart(result, position, pointer_separator);
     position = copyPart(result, position, type_prefix);
+    position = copyPart(result, position, type_separator);
     _ = copyPart(result, position, cased_base);
 
     return result;
@@ -121,6 +137,10 @@ fn stripKnownPrefix(
     scope_prefix: []const u8,
     type_prefix: []const u8,
     pointer_depth: usize,
+    pointer_separator: []const u8,
+    type_separator: []const u8,
+    pascal_base: bool,
+    type_spelling: []const u8,
     name: []const u8,
 ) []const u8 {
     var result = name;
@@ -146,36 +166,127 @@ fn stripKnownPrefix(
         expected_end += config.pointer_marker.len;
     }
 
-    if (expected_end == config.pointer_marker.len * pointer_depth and
-        hasConventionPrefix(result[expected_end..], type_prefix))
-        return result[expected_end + type_prefix.len ..];
+    var matched_expected_prefix = expected_end == config.pointer_marker.len * pointer_depth;
+    if (matched_expected_prefix and pointer_separator.len > 0) {
+        if (std.mem.startsWith(u8, result[expected_end..], pointer_separator)) {
+            expected_end += pointer_separator.len;
+        } else {
+            matched_expected_prefix = false;
+        }
+    }
+
+    const has_expected_prefix = expected_end > 0 or type_prefix.len > 0;
+    const pointer_boundary = pointer_separator.len > 0 or
+        (pointer_depth > 0 and config.pointer_marker[config.pointer_marker.len - 1] == '_');
+    if (matched_expected_prefix and has_expected_prefix and
+        hasExpectedTypePrefix(
+            result[expected_end..],
+            type_prefix,
+            type_separator,
+            pascal_base,
+            pointer_boundary,
+        ))
+        return result[expected_end + type_prefix.len + type_separator.len ..];
 
     var after_pointers: usize = 0;
-    while (config.pointer_marker.len > 0 and
-        std.mem.startsWith(u8, result[after_pointers..], config.pointer_marker))
-    {
+    for (0..pointer_depth) |_| {
+        if (!std.mem.startsWith(u8, result[after_pointers..], config.pointer_marker)) break;
         after_pointers += config.pointer_marker.len;
     }
 
-    if (after_pointers > 0) {
-        if (stripMappedPrefix(config.pointer_mappings.items, result[after_pointers..])) |base| return base;
-        if (stripMappedPrefix(config.mappings.items, result[after_pointers..])) |base| return base;
+    const expected_pointer_length = config.pointer_marker.len * pointer_depth;
+    if (after_pointers > 0 and after_pointers == expected_pointer_length) {
+        const after_pointer_name = result[after_pointers..];
+        if (stripMappedPrefix(config.pointer_mappings.items, type_spelling, after_pointer_name)) |base| return base;
+        if (stripMappedPrefix(config.mappings.items, type_spelling, after_pointer_name)) |base| return base;
+        if (config.legacy_prefixes) {
+            if (stripMappedPrefix(config.legacy_pointer_mappings.items, type_spelling, after_pointer_name)) |base| return base;
+            if (stripMappedPrefix(config.legacy_mappings.items, type_spelling, after_pointer_name)) |base| return base;
+        } else {
+            if (stripMappedPrefix(config.legacy_pointer_mappings.items, type_spelling, after_pointer_name)) |_| return after_pointer_name;
+            if (stripMappedPrefix(config.legacy_mappings.items, type_spelling, after_pointer_name)) |_| return after_pointer_name;
+        }
+
+        if (type_prefix.len == 0 and
+            after_pointers < result.len and std.ascii.isUpper(result[after_pointers]))
+            return result[after_pointers..];
     }
 
-    if (stripMappedPrefix(config.pointer_mappings.items, result)) |base| return base;
-    if (stripMappedPrefix(config.mappings.items, result)) |base| return base;
+    if (pointer_depth > 0) {
+        if (stripMappedPrefix(config.pointer_mappings.items, type_spelling, result)) |base| return base;
+        if (config.legacy_prefixes) {
+            if (stripMappedPrefix(config.legacy_pointer_mappings.items, type_spelling, result)) |base| return base;
+        }
+    }
+
+    if (stripMappedPrefix(config.mappings.items, type_spelling, result)) |base| return base;
+    if (config.legacy_prefixes) {
+        if (stripMappedPrefix(config.legacy_mappings.items, type_spelling, result)) |base| return base;
+    }
+
     return result;
 }
 
-fn stripMappedPrefix(mappings: []const config_mod.TypeMapping, name: []const u8) ?[]const u8 {
-    for (mappings) |mapping| if (hasConventionPrefix(name, mapping.prefix))
-        return name[mapping.prefix.len..];
+fn stripMappedPrefix(
+    mappings: []const config_mod.TypeMapping,
+    type_spelling: []const u8,
+    name: []const u8,
+) ?[]const u8 {
+    for (mappings) |mapping| {
+        if (!config_mod.typeNameMatches(type_spelling, mapping.type_name)) continue;
+        if (stripConventionPrefix(name, mapping.prefix)) |base| return base;
+    }
     return null;
 }
 
-fn hasConventionPrefix(name: []const u8, prefix: []const u8) bool {
-    return prefix.len > 0 and name.len > prefix.len and std.mem.startsWith(u8, name, prefix) and
-        std.ascii.isUpper(name[prefix.len]);
+fn pointerSeparator(
+    config: *const config_mod.Config,
+    type_prefix: []const u8,
+    pointer_depth: usize,
+) []const u8 {
+    if (pointer_depth == 0 or type_prefix.len > 0 or config.variable_case == .pascal)
+        return "";
+    if (config.pointer_marker[config.pointer_marker.len - 1] == '_') return "";
+
+    return "_";
+}
+
+fn typeSeparator(
+    config: *const config_mod.Config,
+    type_prefix: []const u8,
+) []const u8 {
+    if (config.variable_case == .pascal or type_prefix.len == 0) return "";
+    if (type_prefix[type_prefix.len - 1] == '_') return "";
+
+    return "_";
+}
+
+fn hasExpectedTypePrefix(
+    name: []const u8,
+    prefix: []const u8,
+    type_separator: []const u8,
+    pascal_base: bool,
+    pointer_boundary: bool,
+) bool {
+    const combined_length = prefix.len + type_separator.len;
+    if (name.len <= combined_length or !std.mem.startsWith(u8, name, prefix))
+        return false;
+    if (!std.mem.startsWith(u8, name[prefix.len..], type_separator)) return false;
+
+    if (pointer_boundary or type_separator.len > 0 or
+        (prefix.len > 0 and prefix[prefix.len - 1] == '_')) return true;
+    return pascal_base and std.ascii.isUpper(name[combined_length]);
+}
+
+fn stripConventionPrefix(name: []const u8, prefix: []const u8) ?[]const u8 {
+    if (prefix.len == 0 or name.len <= prefix.len or !std.mem.startsWith(u8, name, prefix))
+        return null;
+
+    const base = name[prefix.len..];
+    if (prefix[prefix.len - 1] == '_' or std.ascii.isUpper(base[0])) return base;
+
+    if (base[0] == '_' and base.len > 1) return base[1..];
+    return null;
 }
 
 fn toPascal(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
@@ -226,24 +337,115 @@ fn toSnake(allocator: std.mem.Allocator, input: []const u8) ![]u8 {
     return out.toOwnedSlice(allocator);
 }
 
-test "variable naming strips an existing convention" {
+test "variable naming applies and preserves its configured convention" {
     const allocator = std.testing.allocator;
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+    try config.mappings.append(allocator, .{ .type_name = "std::string", .prefix = "s" });
 
     const first = (try variableName(allocator, &config, .member, false, "int", 0, "numberOfSlice")).?;
     defer allocator.free(first);
     try std.testing.expectEqualStrings("m_nNumberOfSlice", first);
 
-    const second = (try variableName(allocator, &config, .member, false, "int", 0, "m_sNumberOfSlice")).?;
+    const second = (try variableName(allocator, &config, .member, false, "int", 0, "m_nNumberOfSlice")).?;
     defer allocator.free(second);
     try std.testing.expectEqualStrings("m_nNumberOfSlice", second);
+}
+
+test "legacy prefixes only apply to their actual type and pointer state" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    config.variable_case = .lower_camel;
+
+    const unrelated = (try variableName(allocator, &config, .member, false, "int", 0, "m_sValue")).?;
+    defer allocator.free(unrelated);
+    try std.testing.expectEqualStrings("m_sValue", unrelated);
+
+    const integer = (try variableName(allocator, &config, .member, false, "int", 0, "m_nValue")).?;
+    defer allocator.free(integer);
+    try std.testing.expectEqualStrings("m_value", integer);
+
+    const string = (try variableName(allocator, &config, .member, false, "std::string", 0, "m_sValue")).?;
+    defer allocator.free(string);
+    try std.testing.expectEqualStrings("m_value", string);
+
+    const non_pointer_char = (try variableName(allocator, &config, .member, false, "char", 0, "m_sValue")).?;
+    defer allocator.free(non_pointer_char);
+    try std.testing.expectEqualStrings("m_sValue", non_pointer_char);
+
+    const pointer_char = (try variableName(allocator, &config, .member, false, "char", 1, "m_pchName")).?;
+    defer allocator.free(pointer_char);
+    try std.testing.expectEqualStrings("m_p_name", pointer_char);
+}
+
+test "legacy prefix migration can be disabled independently" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+    config.variable_case = .lower_camel;
+    config.legacy_prefixes = false;
+
+    const integer = (try variableName(allocator, &config, .member, false, "int", 0, "m_nValue")).?;
+    defer allocator.free(integer);
+    try std.testing.expectEqualStrings("m_nValue", integer);
+
+    const string = (try variableName(allocator, &config, .member, false, "std::string", 0, "m_sValue")).?;
+    defer allocator.free(string);
+    try std.testing.expectEqualStrings("m_sValue", string);
+
+    const pointer_char = (try variableName(allocator, &config, .member, false, "char", 1, "m_psName")).?;
+    defer allocator.free(pointer_char);
+    try std.testing.expectEqualStrings("m_p_sName", pointer_char);
+
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+    const configured = (try variableName(allocator, &config, .member, false, "int", 0, "m_nValue")).?;
+    defer allocator.free(configured);
+    try std.testing.expectEqualStrings("m_n_value", configured);
+}
+
+test "automatic prefix separators migrate in one pass across cases" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    config.variable_case = .lower_camel;
+    const camel = (try variableName(allocator, &config, .member, false, "int", 0, "m_n_value")).?;
+    defer allocator.free(camel);
+    try std.testing.expectEqualStrings("m_value", camel);
+
+    const camel_again = (try variableName(allocator, &config, .member, false, "int", 0, camel)).?;
+    defer allocator.free(camel_again);
+    try std.testing.expectEqualStrings(camel, camel_again);
+
+    const pointer = (try variableName(allocator, &config, .member, false, "int", 1, "m_pn_value")).?;
+    defer allocator.free(pointer);
+    try std.testing.expectEqualStrings("m_p_value", pointer);
+
+    config.variable_case = .snake;
+    const snake = (try variableName(allocator, &config, .member, false, "int", 0, "m_n_value")).?;
+    defer allocator.free(snake);
+    try std.testing.expectEqualStrings("m_value", snake);
+
+    config.variable_case = .pascal;
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+
+    const pascal = (try variableName(allocator, &config, .member, false, "int", 0, "m_n_value")).?;
+    defer allocator.free(pascal);
+    try std.testing.expectEqualStrings("m_nValue", pascal);
+
+    const pascal_again = (try variableName(allocator, &config, .member, false, "int", 0, pascal)).?;
+    defer allocator.free(pascal_again);
+    try std.testing.expectEqualStrings(pascal, pascal_again);
 }
 
 test "pointer depth sits between scope and type prefixes" {
     const allocator = std.testing.allocator;
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+    try config.pointer_mappings.append(allocator, .{ .type_name = "char", .prefix = "s" });
 
     const member = (try variableName(allocator, &config, .member, false, "char", 1, "name")).?;
     defer allocator.free(member);
@@ -266,6 +468,8 @@ test "local and static variables keep Hungarian type prefixes" {
     const allocator = std.testing.allocator;
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+    try config.pointer_mappings.append(allocator, .{ .type_name = "char", .prefix = "s" });
 
     const local = (try variableName(allocator, &config, .local, false, "char", 1, "funcName")).?;
     defer allocator.free(local);
@@ -308,10 +512,91 @@ test "snake variables allow an empty type prefix" {
     try std.testing.expectEqualStrings("m_func_name", member);
 }
 
+test "empty type prefixes separate pointer markers for camel and snake" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    const pascal = (try variableName(allocator, &config, .member, false, "int", 1, "funcName")).?;
+    defer allocator.free(pascal);
+    try std.testing.expectEqualStrings("m_pFuncName", pascal);
+
+    config.variable_case = .lower_camel;
+    const camel = (try variableName(allocator, &config, .member, false, "int", 1, "funcName")).?;
+    defer allocator.free(camel);
+    try std.testing.expectEqualStrings("m_p_funcName", camel);
+
+    const camel_again = (try variableName(allocator, &config, .member, false, "int", 1, camel)).?;
+    defer allocator.free(camel_again);
+    try std.testing.expectEqualStrings(camel, camel_again);
+
+    config.variable_case = .snake;
+    const snake = (try variableName(allocator, &config, .member, false, "int", 1, "FuncName")).?;
+    defer allocator.free(snake);
+    try std.testing.expectEqualStrings("m_p_func_name", snake);
+
+    const double_pointer = (try variableName(allocator, &config, .member, false, "int", 2, "FuncName")).?;
+    defer allocator.free(double_pointer);
+    try std.testing.expectEqualStrings("m_pp_func_name", double_pointer);
+}
+
+test "camel and snake append only a missing type separator" {
+    const allocator = std.testing.allocator;
+    var config = try config_mod.Config.initDefaults(allocator);
+    defer config.deinit(allocator);
+
+    config.variable_case = .lower_camel;
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
+
+    const natural_prefix = (try variableName(allocator, &config, .member, false, "int", 0, "number")).?;
+    defer allocator.free(natural_prefix);
+    try std.testing.expectEqualStrings("m_n_number", natural_prefix);
+
+    const natural_prefix_again = (try variableName(allocator, &config, .member, false, "int", 0, natural_prefix)).?;
+    defer allocator.free(natural_prefix_again);
+    try std.testing.expectEqualStrings(natural_prefix, natural_prefix_again);
+
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n_" });
+
+    const camel = (try variableName(allocator, &config, .member, false, "int", 0, "func_name")).?;
+    defer allocator.free(camel);
+    try std.testing.expectEqualStrings("m_n_funcName", camel);
+
+    const camel_again = (try variableName(allocator, &config, .member, false, "int", 0, camel)).?;
+    defer allocator.free(camel_again);
+    try std.testing.expectEqualStrings(camel, camel_again);
+
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n__" });
+    const preserved = (try variableName(allocator, &config, .member, false, "int", 0, "num")).?;
+    defer allocator.free(preserved);
+    try std.testing.expectEqualStrings("m_n__num", preserved);
+
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n_" });
+
+    config.variable_case = .snake;
+
+    const snake = (try variableName(allocator, &config, .member, false, "int", 0, "FuncName")).?;
+    defer allocator.free(snake);
+    try std.testing.expectEqualStrings("m_n_func_name", snake);
+
+    const snake_again = (try variableName(allocator, &config, .member, false, "int", 0, snake)).?;
+    defer allocator.free(snake_again);
+    try std.testing.expectEqualStrings(snake, snake_again);
+
+    const pointer = (try variableName(allocator, &config, .member, false, "int", 1, "FuncName")).?;
+    defer allocator.free(pointer);
+    try std.testing.expectEqualStrings("m_pn_func_name", pointer);
+
+    const pointer_again = (try variableName(allocator, &config, .member, false, "int", 1, pointer)).?;
+    defer allocator.free(pointer_again);
+    try std.testing.expectEqualStrings(pointer, pointer_again);
+}
+
 test "global upper snake is accepted as an alternative" {
     const allocator = std.testing.allocator;
     var config = try config_mod.Config.initDefaults(allocator);
     defer config.deinit(allocator);
+    try config.mappings.append(allocator, .{ .type_name = "int", .prefix = "n" });
     try config.global_alternatives.append(allocator, .upper_snake);
 
     const alternative = (try variableName(allocator, &config, .global, false, "int", 0, "TIME_ESCAPE")).?;

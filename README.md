@@ -171,9 +171,30 @@ bool = ""
 "std::string" = ""
 ```
 
+代码内置的标准类型输出前缀均为 `""`；匈牙利输出前缀完全由配置文件决定。工具仍能识别常见旧前缀以迁移已有代码，但不会默认生成它们。`variables.case` 使用 `camel` 或 `snake` 时，非空类型前缀会自动补一个缺失的 `_`：
+
+不需要迁移旧匈牙利前缀时可以关闭识别；显式写在 `[types]` 和 `[pointers]` 中的当前前缀不受影响：
+
+```toml
+[migration]
+legacy_prefixes = false
+```
+
+```toml
+[variables]
+case = "camel"
+
+[types]
+int = "n"             # 输出 n_
+bool = "b_"           # 输出 b_，不重复添加
+double = "d__"        # 输出 d__，保留原配置
+"std::string" = ""   # 不使用类型前缀
+```
+
 ```text
 int funcName          -> m_funcName
 static int funcName   -> s_funcName
+int* funcName         -> m_p_funcName
 ```
 
 下划线命名使用同一开关：
@@ -196,6 +217,15 @@ char* funcName             -> psFuncName
 static char* funcName      -> s_psFuncName
 成员 char* funcName        -> m_psFuncName
 全局 char** names          -> g_ppsNames
+```
+
+当类型前缀为 `""` 时，`camel` 和 `snake` 会在整段指针标记后自动补一个 `_`；`pascal` 继续使用大写主体作为边界：
+
+```text
+pascal + int* funcName -> m_pFuncName
+camel  + int* funcName -> m_p_funcName
+snake  + int* funcName -> m_p_func_name
+snake  + int** names   -> m_pp_names
 ```
 
 const 判断使用 Clang 类型语义：

@@ -238,6 +238,13 @@ fn performFix(
         };
     }
 
+    var post_fix_identities = try buildPostFixIdentities(
+        allocator,
+        selected.items,
+        plan.replacements.items,
+    );
+    defer post_fix_identities.deinit(allocator);
+
     var transaction = try fixer.apply(io, allocator, plan.replacements.items);
     defer transaction.deinit(allocator);
 
@@ -259,7 +266,10 @@ fn performFix(
     };
     defer verification.deinit(allocator);
 
-    const selected_remaining = approved.countSelected(verification.diagnostics.items);
+    const selected_remaining = countRemainingSelectedLocations(
+        post_fix_identities.items,
+        verification.diagnostics.items,
+    );
 
     if (verification.parse_failures > 0 or selected_remaining > 0) {
         transaction.rollback(io, allocator) catch |rollback_err| {
@@ -286,6 +296,142 @@ fn performFix(
         .files = transaction.files.items.len,
         .replacements = transaction.replacement_count,
     };
+}
+
+const PostFixIdentity = struct {
+    file: []const u8,
+    offset: u32,
+    kind: scanner.DiagnosticKind,
+};
+
+fn buildPostFixIdentities(
+    allocator: std.mem.Allocator,
+    selected: []const scanner.Diagnostic,
+    replacements: []const scanner.Replacement,
+) !std.ArrayList(PostFixIdentity) {
+    const indices = try allocator.alloc(usize, selected.len);
+    defer allocator.free(indices);
+    for (indices, 0..) |*index, i| index.* = i;
+    std.mem.sort(usize, indices, selected, diagnosticIndexLessThan);
+
+    var identities: std.ArrayList(PostFixIdentity) = .empty;
+    errdefer identities.deinit(allocator);
+    try identities.ensureTotalCapacity(allocator, selected.len);
+
+    var replacement_index: usize = 0;
+    var active_file: ?[]const u8 = null;
+    var offset_delta: i64 = 0;
+
+    for (indices) |selected_index| {
+        const diagnostic = selected[selected_index];
+        if (active_file == null or !std.mem.eql(u8, active_file.?, diagnostic.file)) {
+            active_file = diagnostic.file;
+            offset_delta = 0;
+
+            while (replacement_index < replacements.len and
+                std.mem.order(u8, replacements[replacement_index].file, diagnostic.file) == .lt)
+            {
+                replacement_index += 1;
+            }
+        }
+
+        while (replacement_index < replacements.len and
+            std.mem.eql(u8, replacements[replacement_index].file, diagnostic.file) and
+            replacements[replacement_index].offset < diagnostic.offset)
+        {
+            const replacement = replacements[replacement_index];
+            offset_delta += @as(i64, @intCast(replacement.new_name.len)) -
+                @as(i64, @intCast(replacement.old_name.len));
+            replacement_index += 1;
+        }
+
+        if (replacement_index >= replacements.len) return error.MissingSelectedDeclarationReplacement;
+        const declaration_replacement = replacements[replacement_index];
+        if (!std.mem.eql(u8, declaration_replacement.file, diagnostic.file) or
+            declaration_replacement.offset != diagnostic.offset or
+            !std.mem.eql(u8, declaration_replacement.old_name, diagnostic.old_name) or
+            !std.mem.eql(u8, declaration_replacement.new_name, diagnostic.suggested_name.?))
+        {
+            return error.MissingSelectedDeclarationReplacement;
+        }
+
+        const adjusted_offset = @as(i64, diagnostic.offset) + offset_delta;
+        if (adjusted_offset < 0 or adjusted_offset > std.math.maxInt(u32))
+            return error.InvalidReplacementOffset;
+
+        identities.appendAssumeCapacity(.{
+            .file = diagnostic.file,
+            .offset = @intCast(adjusted_offset),
+            .kind = diagnostic.kind,
+        });
+    }
+
+    std.mem.sort(PostFixIdentity, identities.items, {}, postFixIdentityLessThan);
+    return identities;
+}
+
+fn countRemainingSelectedLocations(
+    identities: []const PostFixIdentity,
+    verification: []const scanner.Diagnostic,
+) usize {
+    var count: usize = 0;
+    var verification_index: usize = 0;
+
+    for (identities) |identity| {
+        while (verification_index < verification.len and
+            diagnosticLocationLessThanIdentity(verification[verification_index], identity))
+        {
+            verification_index += 1;
+        }
+
+        var candidate_index = verification_index;
+        while (candidate_index < verification.len and
+            sameLocation(verification[candidate_index], identity)) : (candidate_index += 1)
+        {
+            if (verification[candidate_index].kind == identity.kind) {
+                count += 1;
+                break;
+            }
+        }
+    }
+
+    return count;
+}
+
+fn diagnosticIndexLessThan(
+    diagnostics: []const scanner.Diagnostic,
+    a_index: usize,
+    b_index: usize,
+) bool {
+    const a = diagnostics[a_index];
+    const b = diagnostics[b_index];
+    const file_order = std.mem.order(u8, a.file, b.file);
+    if (file_order == .lt) return true;
+    if (file_order == .gt) return false;
+    if (a.offset != b.offset) return a.offset < b.offset;
+    return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+}
+
+fn postFixIdentityLessThan(_: void, a: PostFixIdentity, b: PostFixIdentity) bool {
+    const file_order = std.mem.order(u8, a.file, b.file);
+    if (file_order == .lt) return true;
+    if (file_order == .gt) return false;
+    if (a.offset != b.offset) return a.offset < b.offset;
+    return @intFromEnum(a.kind) < @intFromEnum(b.kind);
+}
+
+fn diagnosticLocationLessThanIdentity(
+    diagnostic: scanner.Diagnostic,
+    identity: PostFixIdentity,
+) bool {
+    const file_order = std.mem.order(u8, diagnostic.file, identity.file);
+    if (file_order == .lt) return true;
+    if (file_order == .gt) return false;
+    return diagnostic.offset < identity.offset;
+}
+
+fn sameLocation(diagnostic: scanner.Diagnostic, identity: PostFixIdentity) bool {
+    return diagnostic.offset == identity.offset and std.mem.eql(u8, diagnostic.file, identity.file);
 }
 
 fn parseArgs(args: []const []const u8) !Options {
@@ -438,4 +584,79 @@ test {
     _ = @import("compilation_db.zig");
     _ = @import("idents.zig");
     _ = @import("clang_problems.zig");
+}
+
+test "post-fix verification follows adjusted declaration locations" {
+    const function = scanner.Diagnostic{
+        .file = "/project/sample.cpp",
+        .line = 1,
+        .column = 5,
+        .offset = 4,
+        .kind = .function,
+        .usr = "c:@F@bad_name#",
+        .old_name = "bad_name",
+        .suggested_name = "goodIdentifier",
+        .type_spelling = null,
+    };
+    const variable = scanner.Diagnostic{
+        .file = "/project/sample.cpp",
+        .line = 2,
+        .column = 5,
+        .offset = 20,
+        .kind = .variable,
+        .usr = "c:@value",
+        .old_name = "value",
+        .suggested_name = "m_value",
+        .type_spelling = "int",
+    };
+    const replacements = [_]scanner.Replacement{
+        .{
+            .file = function.file,
+            .offset = function.offset,
+            .old_name = function.old_name,
+            .new_name = function.suggested_name.?,
+        },
+        .{
+            .file = variable.file,
+            .offset = variable.offset,
+            .old_name = variable.old_name,
+            .new_name = variable.suggested_name.?,
+        },
+    };
+
+    var identities = try buildPostFixIdentities(
+        std.testing.allocator,
+        &.{ function, variable },
+        &replacements,
+    );
+    defer identities.deinit(std.testing.allocator);
+
+    try std.testing.expectEqual(@as(u32, 4), identities.items[0].offset);
+    try std.testing.expectEqual(@as(u32, 26), identities.items[1].offset);
+
+    var renamed_function = function;
+    renamed_function.usr = "c:@F@goodIdentifier#";
+    renamed_function.old_name = "goodIdentifier";
+    renamed_function.suggested_name = "stillWrong";
+
+    var renamed_variable = variable;
+    renamed_variable.offset = 26;
+    renamed_variable.usr = "c:sample.cpp@26@F@goodIdentifier#@m_value";
+    renamed_variable.old_name = "m_value";
+    renamed_variable.suggested_name = "m_m_value";
+
+    var unrelated = renamed_variable;
+    unrelated.offset = 40;
+    unrelated.usr = "c:@unrelated";
+
+    try std.testing.expectEqual(
+        @as(usize, 2),
+        countRemainingSelectedLocations(identities.items, &.{ renamed_function, renamed_variable, unrelated }),
+    );
+
+    renamed_variable.kind = .function;
+    try std.testing.expectEqual(
+        @as(usize, 1),
+        countRemainingSelectedLocations(identities.items, &.{ renamed_function, renamed_variable }),
+    );
 }

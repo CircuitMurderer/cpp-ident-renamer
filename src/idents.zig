@@ -21,14 +21,6 @@ pub const Selection = struct {
         const value = marker(diagnostic);
         return self.markers.contains(value[0..]);
     }
-
-    pub fn countSelected(self: *const Selection, diagnostics: []const scanner.Diagnostic) usize {
-        var count: usize = 0;
-        for (diagnostics) |diagnostic| if (self.contains(diagnostic)) {
-            count += 1;
-        };
-        return count;
-    }
 };
 
 pub const StreamingWriter = struct {

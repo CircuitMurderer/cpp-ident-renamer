@@ -4,6 +4,9 @@ use_canonical_type = true
 downgrade_all_warnings = false
 downgrade_warnings = ["-Wsign-conversion"]
 
+[migration]
+legacy_prefixes = true
+
 [variables]
 case = "pascal"
 
@@ -36,5 +39,7 @@ marker = "p"
 char = "s"
 
 [types]
+int = "n"
+double = "d"
 "project::Request" = "req"
 "project::String" = "s"

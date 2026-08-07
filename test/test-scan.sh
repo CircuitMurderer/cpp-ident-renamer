@@ -115,11 +115,9 @@ set -e
 [ "$status" -eq 2 ]
 grep -q '^Errors: 1$' hard-error-progress.txt
 
-awk '
-  $0 == "case = \"pascal\"" { print "case = \"camel\""; next }
-  { print }
-  $0 == "[types]" { print "int = \"\"" }
-' test/fixture/ident-mod.toml >ident-mod-camel-variables.toml
+sed 's/^case = "pascal"$/case = "camel"/' \
+  test/fixture/ident-mod.toml >ident-mod-camel-variables.toml
+
 set +e
 "$tool" check \
   -p test/fixture/compile_commands.json \
@@ -130,9 +128,9 @@ set -e
 
 [ "$status" -eq 1 ]
 awk -F '\t' '
-  $3 == "numberOfSlice" && $4 == "m_numberOfSlice" { member = 1 }
-  $3 == "result" { exit 1 }
-  END { if (!member) exit 1 }
+  $3 == "numberOfSlice" && $4 == "m_n_numberOfSlice" { member = 1 }
+  $3 == "result" && $4 == "n_result" { local = 1 }
+  END { if (!member || !local) exit 1 }
 ' idents.tsv
 
 sed \
@@ -149,8 +147,8 @@ set -e
 
 [ "$status" -eq 1 ]
 awk -F '\t' '
-  $3 == "numberOfSlice" && $4 == "m_number_of_slice" { member = 1 }
+  $3 == "numberOfSlice" && $4 == "m_n_number_of_slice" { member = 1 }
   $3 == "calculateTotal" && $4 == "calculate_total" { free_function = 1 }
-  $3 == "result" { exit 1 }
-  END { if (!member || !free_function) exit 1 }
+  $3 == "result" && $4 == "n_result" { local = 1 }
+  END { if (!member || !free_function || !local) exit 1 }
 ' idents.tsv

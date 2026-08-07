@@ -5,8 +5,12 @@ use_canonical_type = true
 downgrade_all_warnings = false
 downgrade_warnings = [] # "sign-conversion" or "-Wsign-conversion"
 
+[migration]
+legacy_prefixes = true # Recognize built-in legacy Hungarian prefixes.
+
 [variables]
 case = "pascal" # pascal / camel / snake
+# Camel and snake append one separator when a non-empty type prefix lacks "_".
 
 [scan]
 local = true
